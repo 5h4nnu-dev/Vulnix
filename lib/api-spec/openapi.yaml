@@ -1,15 +1,18 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Security Scanner API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: scans
+    description: Security scan operations
+  - name: vulnerabilities
+    description: Vulnerability data operations
 paths:
   /healthz:
     get:
@@ -24,6 +27,177 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /scans:
+    post:
+      operationId: createScan
+      tags: [scans]
+      summary: Create a new security scan
+      description: Starts a new security scan for the given URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateScanBody"
+      responses:
+        "201":
+          description: Scan created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Scan"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: listScans
+      tags: [scans]
+      summary: List all scans
+      description: Returns paginated list of all scans
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: number
+        - name: offset
+          in: query
+          schema:
+            type: number
+      responses:
+        "200":
+          description: List of scans
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanList"
+
+  /scans/{id}:
+    get:
+      operationId: getScan
+      tags: [scans]
+      summary: Get scan by ID
+      description: Returns a scan with its vulnerabilities and timeline
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Scan details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanDetail"
+        "404":
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteScan
+      tags: [scans]
+      summary: Delete a scan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Scan deleted
+
+  /scans/{id}/status:
+    get:
+      operationId: getScanStatus
+      tags: [scans]
+      summary: Get scan status and progress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Scan status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanStatus"
+
+  /scans/{id}/events:
+    get:
+      operationId: getScanEvents
+      tags: [scans]
+      summary: Get scan timeline events
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of scan events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanEventList"
+
+  /scans/{id}/vulnerabilities:
+    get:
+      operationId: getScanVulnerabilities
+      tags: [scans]
+      summary: Get vulnerabilities found in a scan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of vulnerabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VulnerabilityList"
+
+  /stats/summary:
+    get:
+      operationId: getStatsSummary
+      tags: [vulnerabilities]
+      summary: Get overall statistics summary
+      description: Returns aggregated vulnerability statistics across all scans
+      responses:
+        "200":
+          description: Statistics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsSummary"
+
+  /stats/recent-activity:
+    get:
+      operationId: getRecentActivity
+      tags: [vulnerabilities]
+      summary: Get recent scan activity
+      responses:
+        "200":
+          description: Recent activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentActivity"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +208,336 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required:
+        - error
+        - message
+
+    CreateScanBody:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Target URL to scan
+        options:
+          type: object
+          properties:
+            checkHeaders:
+              type: boolean
+              default: true
+            checkCors:
+              type: boolean
+              default: true
+            checkSqlInjection:
+              type: boolean
+              default: true
+            checkXss:
+              type: boolean
+              default: true
+            checkOpenRedirect:
+              type: boolean
+              default: true
+            checkHttpMethods:
+              type: boolean
+              default: true
+            checkRateLimit:
+              type: boolean
+              default: false
+          required:
+            - checkHeaders
+            - checkCors
+            - checkSqlInjection
+            - checkXss
+            - checkOpenRedirect
+            - checkHttpMethods
+            - checkRateLimit
+      required:
+        - url
+        - options
+
+    Scan:
+      type: object
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        riskScore:
+          type: number
+          nullable: true
+        riskLevel:
+          type: string
+          nullable: true
+          enum: [critical, high, medium, low, info]
+        vulnerabilityCount:
+          type: number
+        criticalCount:
+          type: number
+        highCount:
+          type: number
+        mediumCount:
+          type: number
+        lowCount:
+          type: number
+        createdAt:
+          type: string
+        completedAt:
+          type: string
+          nullable: true
+      required:
+        - id
+        - url
+        - status
+        - riskScore
+        - riskLevel
+        - vulnerabilityCount
+        - criticalCount
+        - highCount
+        - mediumCount
+        - lowCount
+        - createdAt
+        - completedAt
+
+    ScanList:
+      type: object
+      properties:
+        scans:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scan"
+        total:
+          type: number
+      required:
+        - scans
+        - total
+
+    ScanDetail:
+      type: object
+      properties:
+        scan:
+          $ref: "#/components/schemas/Scan"
+        vulnerabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Vulnerability"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScanEvent"
+      required:
+        - scan
+        - vulnerabilities
+        - events
+
+    ScanStatus:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        progress:
+          type: number
+          description: Progress percentage 0-100
+        currentStage:
+          type: string
+          nullable: true
+        stagesCompleted:
+          type: array
+          items:
+            type: string
+        stagesTotal:
+          type: number
+      required:
+        - id
+        - status
+        - progress
+        - currentStage
+        - stagesCompleted
+        - stagesTotal
+
+    ScanEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        scanId:
+          type: string
+        stage:
+          type: string
+        eventType:
+          type: string
+          enum: [request, response, finding, info, error]
+        title:
+          type: string
+        description:
+          type: string
+        payload:
+          type: string
+          nullable: true
+        requestHeaders:
+          type: string
+          nullable: true
+        responseStatus:
+          type: number
+          nullable: true
+        responseHeaders:
+          type: string
+          nullable: true
+        responseBody:
+          type: string
+          nullable: true
+        severity:
+          type: string
+          nullable: true
+          enum: [critical, high, medium, low, info]
+        timestamp:
+          type: string
+      required:
+        - id
+        - scanId
+        - stage
+        - eventType
+        - title
+        - description
+        - payload
+        - requestHeaders
+        - responseStatus
+        - responseHeaders
+        - responseBody
+        - severity
+        - timestamp
+
+    ScanEventList:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScanEvent"
+      required:
+        - events
+
+    Vulnerability:
+      type: object
+      properties:
+        id:
+          type: string
+        scanId:
+          type: string
+        type:
+          type: string
+          enum: [sql_injection, xss, open_redirect, cors_misconfiguration, missing_security_header, http_method_abuse, command_injection, idor, rate_limit_bypass, information_disclosure]
+        severity:
+          type: string
+          enum: [critical, high, medium, low, info]
+        title:
+          type: string
+        description:
+          type: string
+        affectedEndpoint:
+          type: string
+        payload:
+          type: string
+          nullable: true
+        evidence:
+          type: string
+          nullable: true
+        aiExplanation:
+          type: string
+          nullable: true
+        remediation:
+          type: string
+        cvssScore:
+          type: number
+          nullable: true
+        discoveredAt:
+          type: string
+      required:
+        - id
+        - scanId
+        - type
+        - severity
+        - title
+        - description
+        - affectedEndpoint
+        - payload
+        - evidence
+        - aiExplanation
+        - remediation
+        - cvssScore
+        - discoveredAt
+
+    VulnerabilityList:
+      type: object
+      properties:
+        vulnerabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Vulnerability"
+      required:
+        - vulnerabilities
+
+    StatsSummary:
+      type: object
+      properties:
+        totalScans:
+          type: number
+        totalVulnerabilities:
+          type: number
+        criticalCount:
+          type: number
+        highCount:
+          type: number
+        mediumCount:
+          type: number
+        lowCount:
+          type: number
+        avgRiskScore:
+          type: number
+        topVulnerabilityTypes:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              count:
+                type: number
+            required:
+              - type
+              - count
+      required:
+        - totalScans
+        - totalVulnerabilities
+        - criticalCount
+        - highCount
+        - mediumCount
+        - lowCount
+        - avgRiskScore
+        - topVulnerabilityTypes
+
+    RecentActivity:
+      type: object
+      properties:
+        recentScans:
+          type: array
+          items:
+            $ref: "#/components/schemas/Scan"
+        recentVulnerabilities:
+          type: array
+          items:
+            $ref: "#/components/schemas/Vulnerability"
+      required:
+        - recentScans
+        - recentVulnerabilities

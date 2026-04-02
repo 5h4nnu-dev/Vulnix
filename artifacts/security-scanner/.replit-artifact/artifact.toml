@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Security Scanner"
+version = "1.0.0"
+id = "artifacts/security-scanner"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23842
+
+[services.development]
+run = "pnpm --filter @workspace/security-scanner run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/security-scanner", "run", "build" ]
+publicDir = "artifacts/security-scanner/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23842"
+BASE_PATH = "/"
