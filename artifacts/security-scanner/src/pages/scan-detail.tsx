@@ -7,7 +7,7 @@ import {
   useGetScanVulnerabilities,
   getGetScanStatusQueryKey
 } from "@workspace/api-client-react";
-import { Terminal, ShieldAlert, ShieldCheck, AlertTriangle, Shield, Globe, Clock, ChevronDown, CheckCircle2, XCircle, Loader2, Info } from "lucide-react";
+import { Terminal, ShieldAlert, ShieldCheck, AlertTriangle, Shield, Globe, Clock, ChevronDown, CheckCircle2, XCircle, Loader2, Info, Bug, Activity } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
