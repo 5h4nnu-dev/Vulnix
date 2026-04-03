@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SecureProbe — Web Security Scanner</title>
+  <meta name="description"
+    content="SecureProbe is an automated web security vulnerability scanner that detects SQL Injection, XSS, CORS misconfigurations, and more." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+  <!-- Animated background -->
+  <div class="bg-grid"></div>
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        </svg>
+      </div>
+      <span class="logo-text">SecureProbe</span>
+      <span class="logo-version">v2.0</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="dashboard" id="nav-dashboard">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7"></rect>
+          <rect x="14" y="3" width="7" height="7"></rect>
+          <rect x="3" y="14" width="7" height="7"></rect>
+          <rect x="14" y="14" width="7" height="7"></rect>
+        </svg>
+        Dashboard
+      </a>
+      <a href="#" class="nav-item" data-page="new-scan" id="nav-new-scan">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        New Scan
+      </a>
+      <a href="#" class="nav-item" data-page="history" id="nav-history">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        Scan History
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-text">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        Only scan URLs you own
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main-content" id="main-content">
+
+    <!-- Dashboard Page -->
+    <div class="page active" id="page-dashboard">
+      <div class="page-header">
+        <h1>Dashboard</h1>
+        <p class="page-subtitle">Security overview at a glance</p>
+      </div>
+
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon stat-icon-blue">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="stat-total-scans">—</span>
+            <span class="stat-label">Total Scans</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon stat-icon-red">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="stat-total-vulns">—</span>
+            <span class="stat-label">Vulnerabilities</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon stat-icon-orange">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="stat-avg-risk">—</span>
+            <span class="stat-label">Avg Risk Score</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon stat-icon-purple">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon
+                points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2">
+              </polygon>
+            </svg>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value" id="stat-critical-count">—</span>
+            <span class="stat-label">Critical Issues</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-grid">
+        <div class="card">
+          <div class="card-header">
+            <h2>Recent Scans</h2>
+          </div>
+          <div class="card-body" id="recent-scans-list">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h2>Vulnerability Breakdown</h2>
+          </div>
+          <div class="card-body" id="vuln-breakdown">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- New Scan Page -->
+    <div class="page" id="page-new-scan">
+      <div class="page-header">
+        <h1>New Scan</h1>
+        <p class="page-subtitle">Paste a URL to start a security analysis</p>
+      </div>
+
+      <div class="scan-form-card card">
+        <div class="card-body">
+          <div class="url-input-group">
+            <div class="url-input-wrapper">
+              <svg class="url-input-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+              </svg>
+              <input type="url" id="scan-url-input" class="url-input" placeholder="https://example.com"
+                autocomplete="off" />
+            </div>
+            <button class="btn btn-primary btn-scan" id="btn-start-scan">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              Start Scan
+            </button>
+          </div>
+
+          <div class="scan-options">
+            <h3>Scan Options</h3>
+            <div class="options-grid">
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-headers" checked /><span class="toggle-slider"></span>
+                <span class="option-label">Security Headers</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-cors" checked /><span class="toggle-slider"></span>
+                <span class="option-label">CORS Analysis</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-sqli" checked /><span class="toggle-slider"></span>
+                <span class="option-label">SQL Injection</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-xss" checked /><span class="toggle-slider"></span>
+                <span class="option-label">XSS Detection</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-redirect" checked /><span class="toggle-slider"></span>
+                <span class="option-label">Open Redirect</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-methods" checked /><span class="toggle-slider"></span>
+                <span class="option-label">HTTP Methods</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-ratelimit" checked /><span class="toggle-slider"></span>
+                <span class="option-label">Rate Limiting</span>
+              </label>
+              <label class="option-toggle">
+                <input type="checkbox" id="opt-files" checked /><span class="toggle-slider"></span>
+                <span class="option-label">Sensitive Files</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scan Progress (shown during scan) -->
+      <div class="card scan-progress-card hidden" id="scan-progress-card">
+        <div class="card-body">
+          <div class="progress-header">
+            <div class="progress-status">
+              <div class="pulse-dot"></div>
+              <span id="scan-status-text">Scanning…</span>
+            </div>
+            <span class="progress-percent" id="scan-progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="scan-progress-bar"></div>
+          </div>
+          <div class="progress-stage" id="scan-stage-text">Initializing…</div>
+          <div class="scan-live-events" id="scan-live-events"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scan History Page -->
+    <div class="page" id="page-history">
+      <div class="page-header">
+        <h1>Scan History</h1>
+        <p class="page-subtitle">All past security scans</p>
+      </div>
+      <div class="card">
+        <div class="card-body" id="history-list">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scan Detail Page -->
+    <div class="page" id="page-scan-detail">
+      <div class="page-header">
+        <button class="btn btn-ghost" id="btn-back-from-detail">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          Back
+        </button>
+        <div class="detail-header-actions">
+          <button class="btn btn-outline" id="btn-download-report">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download Report
+          </button>
+          <button class="btn btn-danger-outline" id="btn-delete-scan">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <div class="detail-scan-info" id="detail-scan-info"></div>
+      <div class="detail-vulns-section" id="detail-vulns-section"></div>
+      <div class="detail-events-section" id="detail-events-section"></div>
+    </div>
+
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+
+</html>
