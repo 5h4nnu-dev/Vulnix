@@ -49,7 +49,7 @@ Secure-Data-Vault/
 - 💾 Persistent SQLite storage
 - 🎨 Premium dark-mode UI
 
-```
+
 
 ## 🧠 Why Vulnix is Different
 
@@ -97,6 +97,4 @@ Vulnix is not just a tool — it’s a **learning platform**:
 
 > **Vulnix focuses on understanding, not just scanning.**
 
-## License
 
-MIT
