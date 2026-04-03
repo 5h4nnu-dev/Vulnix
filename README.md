@@ -1,4 +1,4 @@
-# SecureProbe v2.0
+# Vulninx
 
 > Automated web security vulnerability scanner with detailed reports.
 
