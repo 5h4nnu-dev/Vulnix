@@ -1,11 +1,15 @@
 {
   "name": "secureprobe",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "SecureProbe — Automated web security vulnerability scanner with detailed reports",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit --detectOpenHandles",
+    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch --forceExit",
+    "test:coverage": "node --experimental-vm-modules node_modules/.bin/jest --coverage --forceExit",
+    "test:verbose": "node --experimental-vm-modules node_modules/.bin/jest --verbose --forceExit"
   },
   "keywords": [
     "security",
@@ -15,8 +19,12 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
+    "better-sqlite3": "^12.10.0",
     "express": "^4.21.0",
     "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2"
   }
 }
