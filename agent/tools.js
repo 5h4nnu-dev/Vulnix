@@ -9,6 +9,7 @@
 
 const UA = 'Vulnix-Agent/1.0';
 const payloadGenerator = require('../llm/payloadGenerator');
+const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('../xss-guards');
 
 // ── Small self-contained helpers (avoid coupling to scanner.js) ───────────────
 
@@ -144,14 +145,28 @@ async function detectXss(url, param, payload) {
     if (!target) return { vulnerable: false, reason: 'invalid URL' };
     const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
     if (!resp) return { vulnerable: false, reason: 'no response' };
-    const body = await readBody(resp);
-    // ONLY unencoded reflection is an XSS signal. HTML-entity-encoded output is
-    // the correct mitigation — decoding it to compare defeats the defense and
-    // flags every properly-escaped page as vulnerable.
-    if (body.includes(payload)) {
-        return { vulnerable: true, technique: 'reflection', evidence: `payload reflected at index ${body.indexOf(payload)}`, status: resp.status };
+
+    // Mirror scanner.checkXss sinks: raw reflection in a JSON/XML/JS body is
+    // not executable, and neither is reflection inside an HTML comment, inside
+    // a quoted attribute it cannot break out of, or a payload that is not an
+    // executable HTML token at all. ONLY unencoded reflection in an HTML sink
+    // is an XSS signal — HTML-entity-encoded output is the correct mitigation,
+    // so we never decode before comparing.
+    const ct = resp.headers.get('content-type') || '';
+    if (!isRenderableHtml(ct)) {
+        return { vulnerable: false, reason: `non-HTML content-type (${ct || 'none'})`, status: resp.status };
     }
-    return { vulnerable: false, reason: 'no unencoded reflection (encoded output is safe)', status: resp.status };
+
+    const body = await readBody(resp);
+    const idx = body.indexOf(payload);
+    if (idx === -1) return { vulnerable: false, reason: 'no unencoded reflection (encoded output is safe)', status: resp.status };
+    if (isInsideHtmlComment(body, idx) || isInsideQuotedAttribute(body, idx, payload)) {
+        return { vulnerable: false, reason: 'reflection is inert (comment/attribute)', status: resp.status };
+    }
+    if (!hasExecutableXssToken(payload)) {
+        return { vulnerable: false, reason: 'payload is not an executable HTML token', status: resp.status };
+    }
+    return { vulnerable: true, technique: 'reflection', evidence: `payload reflected at index ${idx}`, status: resp.status };
 }
 
 async function detectCommandInjection(url, param, payload, baseline) {

@@ -8,6 +8,7 @@ const payloadGenerator = require('./llm/payloadGenerator');
 const analyst = require('./llm/analyst');
 const summaryGen = require('./llm/summary');
 const agentLoop = require('./agent/loop');
+const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('./xss-guards');
 
 // ── Payloads (loaded from modular payload engine) ───────────────────────────
 
@@ -260,41 +261,8 @@ function htmlDecode(str) {
 }
 
 // ── Reflection-sink guards ──────────────────────────────────────────────────
-// Unencoded reflection is only *exploitable* XSS when the payload lands in a
-// place the browser actually executes as HTML. These guards cut the classic
-// false positives: "reflected in JSON", "reflected inside an HTML comment",
-// "reflected inside a quoted attribute without breaking out", and "payloads
-// that are not executable HTML tokens at all".
-
-const XSS_EXEC_TOKEN = /<script|<\/script|<img|<svg|<iframe|<video|<audio|<details|<marquee|<object|<embed|<body|<form|<input|<button|<math|<a[^>]*href\s*=\s*["']?javascript:|onerror\s*=|onload\s*=|onclick\s*=|onmouseover\s*=|onfocus\s*=|onstart\s*=|onbegin\s*=|onpointerover\s*=|onloadstart\s*=|ontoggle\s*=|javascript:/i;
-
-function hasExecutableXssToken(payload) {
-    return XSS_EXEC_TOKEN.test(payload);
-}
-
-function isInsideHtmlComment(body, idx) {
-    const open = body.lastIndexOf('<!--', idx);
-    if (open === -1) return false;
-    const close = body.lastIndexOf('-->', idx);
-    return close < open;
-}
-
-// True when `idx` sits inside a quoted HTML attribute value AND the payload
-// does not contain the surrounding quote character (so it cannot break out).
-// In that position the value is inert text: `<input value="<script>..">`
-// does not execute anything.
-function isInsideQuotedAttribute(body, idx, payload) {
-    const before = body.slice(Math.max(0, idx - 300), idx);
-    const lastDouble = before.lastIndexOf('"');
-    const lastSingle = before.lastIndexOf("'");
-    if (lastDouble === -1 && lastSingle === -1) return false;
-    const quote = lastDouble > lastSingle ? '"' : "'";
-    const q = Math.max(lastDouble, lastSingle);
-    const segment = before.slice(0, q + 1);
-    const opens = (segment.match(new RegExp('\\' + quote, 'g')) || []).length;
-    if (opens % 2 === 0) return false;
-    return !payload.includes(quote);
-}
+// Shared with the agent detectors via ./xss-guards so both engines agree on
+// what counts as an exploitable sink (see that module for the rationale).
 
 /**
  * Extract candidate redirect destinations from an HTML body: `<meta refresh>`
@@ -865,8 +833,7 @@ async function checkXss(scanId, url, extraPayloads = [], opts = {}) {
             // the payload string is not an XSS sink — reporting it was one of
             // the biggest false-positive sources.
             const ct = resp.headers.get('content-type') || '';
-            const renderable = ct === '' || /^text\/html/i.test(ct) || /^application\/xhtml\+xml/i.test(ct);
-            if (!renderable) continue;
+            if (!isRenderableHtml(ct)) continue;
 
             let body = '';
             try { body = await resp.text(); } catch { }

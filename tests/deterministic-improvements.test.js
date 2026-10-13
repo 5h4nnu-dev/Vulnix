@@ -110,6 +110,10 @@ describe('reflection-sink guards', () => {
         expect(scanner.isInsideQuotedAttribute(inAttr, idx, '"><script>alert(1)</script>')).toBe(false);
         // Plain element-content reflection is not inside an attribute.
         expect(scanner.isInsideQuotedAttribute('<body><p>Hi <script>x</script>', '<body><p>Hi <script>x</script>'.indexOf('<script>'), '<script>x</script>')).toBe(false);
+        // Regression: an unpaired apostrophe in prose must not be mistaken for
+        // an open attribute quote (this used to suppress genuine XSS).
+        const prose = "<html><body>It's a fine day <script>alert(1)</script></body></html>";
+        expect(scanner.isInsideQuotedAttribute(prose, prose.indexOf('<script>'), '<script>alert(1)</script>')).toBe(false);
     });
 
     it('does not flag XSS when the payload is only reflected in JSON', async () => {
@@ -142,6 +146,12 @@ describe('reflection-sink guards', () => {
         const f = found('xss');
         expect(f).toBeDefined();
         expect(f.severity).toBe('high');
+    });
+
+    it('flags XSS when prose before the sink contains an apostrophe', async () => {
+        global.fetch = jest.fn(async () => textResponse("<html><body>It's a search result <script>alert(1)</script></body></html>"));
+        await scanner.checkXss('t-apostrophe', 'http://target.test/?q=1', ['<script>alert(1)</script>']);
+        expect(found('xss')).toBeDefined();
     });
 });
 
