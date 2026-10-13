@@ -217,6 +217,25 @@
                 <label class="option-toggle"><input type="checkbox" id="opt-methods" checked /><span class="toggle-slider"></span><span class="option-label">HTTP Methods</span></label>
                 <label class="option-toggle"><input type="checkbox" id="opt-ratelimit" checked /><span class="toggle-slider"></span><span class="option-label">Rate Limiting</span></label>
                 <label class="option-toggle"><input type="checkbox" id="opt-files" checked /><span class="toggle-slider"></span><span class="option-label">Sensitive Files</span></label>
+                <label class="option-toggle"><input type="checkbox" id="opt-cmdi" checked /><span class="toggle-slider"></span><span class="option-label">Command Injection</span></label>
+                <label class="option-toggle"><input type="checkbox" id="opt-traversal" checked /><span class="toggle-slider"></span><span class="option-label">Path Traversal</span></label>
+                <label class="option-toggle"><input type="checkbox" id="opt-ssrf" checked /><span class="toggle-slider"></span><span class="option-label">SSRF</span></label>
+                <label class="option-toggle"><input type="checkbox" id="opt-promptinj" checked /><span class="toggle-slider"></span><span class="option-label">Prompt Injection</span></label>
+              </div>
+
+              <div class="ai-controls">
+                <div class="ai-control-row">
+                  <label class="ai-control-label" for="scan-mode">Scan Mode</label>
+                  <select id="scan-mode" class="ai-select">
+                    <option value="deterministic">Deterministic (fast, no AI)</option>
+                    <option value="hybrid">Hybrid (recon + AI agent)</option>
+                    <option value="agent">Autonomous AI Agent</option>
+                  </select>
+                </div>
+                <label class="option-toggle ai-authorize"><input type="checkbox" id="opt-authorized" /><span class="toggle-slider"></span><span class="option-label">I am authorized to test this target</span></label>
+                <div class="ai-status-chip" id="ai-status-chip">
+                  <span class="ai-chip-dot"></span><span id="ai-status-text">Checking AI…</span>
+                </div>
               </div>
             </div>
           </div>
@@ -272,7 +291,14 @@
                 <polyline points="7 10 12 15 17 10"></polyline>
                 <line x1="12" y1="15" x2="12" y2="3"></line>
               </svg>
-              Download Report
+              Markdown
+            </button>
+            <button class="btn btn-outline" id="btn-download-docx">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+              Word (.docx)
             </button>
             <button class="btn btn-danger-outline" id="btn-delete-scan">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -285,6 +311,9 @@
         </div>
 
         <div class="detail-scan-info" id="detail-scan-info"></div>
+        <div class="detail-promptinj-section" id="detail-promptinj-section"></div>
+        <div class="detail-agent-section" id="detail-agent-section"></div>
+        <div class="detail-aipayloads-section" id="detail-aipayloads-section"></div>
         <div class="detail-vulns-section" id="detail-vulns-section"></div>
         <div class="detail-payloads-section" id="detail-payloads-section"></div>
         <div class="detail-events-section" id="detail-events-section"></div>

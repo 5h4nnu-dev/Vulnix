@@ -25,44 +25,17 @@ jest.mock('../database', () => {
     };
 });
 
-const REAL_SITES = {
-    'google.com':           { expects: 'low',    maxScore: 15 },
-    'youtube.com':          { expects: 'low',    maxScore: 15 },
-    'github.com':           { expects: 'low',    maxScore: 15 },
-    'stackoverflow.com':    { expects: 'low',    maxScore: 15 },
-};
-
-function mockResponse(status, headers = {}, body = '', setCookies = []) {
-    return {
-        status,
-        headers: {
-            _entries: { ...headers },
-            get(name) {
-                const lower = name.toLowerCase();
-                for (const [k, v] of Object.entries(this._entries)) {
-                    if (k.toLowerCase() === lower) return v;
-                }
-                return null;
-            },
-            forEach(cb) { Object.entries(this._entries).forEach(([k, v]) => cb(v, k)); },
-            getSetCookie() { return setCookies; },
-        },
-        text: () => Promise.resolve(body),
-    };
-}
-
-function mockFetchSequence(responses) {
-    let callCount = 0;
-    const globalFetch = global.fetch;
-    beforeEach(() => {
-        callCount = 0;
-        global.fetch = jest.fn(() => {
-            const resp = responses[Math.min(callCount++, responses.length - 1)];
-            return Promise.resolve(resp);
-        });
-    });
-    afterEach(() => { global.fetch = globalFetch; });
-}
+/**
+ * Risk-score regression tests.
+ *
+ * NOTE: This file used to masquerade as a benchmark of real sites
+ * (google.com / youtube.com / ...). No such benchmark ever ran — the site
+ * table was dead code and every assertion was computed from hand-written
+ * finding lists. It now states honestly what it tests: the deterministic
+ * computeRiskScore maturity thresholds. Real-target behaviour is covered by
+ * tests/e2e-target.test.js, which runs the scanner against live in-process
+ * HTTP targets.
+ */
 
 function categorize(vulns) {
     const counts = { active: 0, redirect: 0, config: 0, exposure: 0, info: 0 };
@@ -76,10 +49,22 @@ function categorize(vulns) {
     return counts;
 }
 
-describe('Google — pristine homepage (no vulns expected)', () => {
+describe('computeRiskScore — config-only findings stay low', () => {
     const { computeRiskScore } = require('../scanner');
 
-    it('risk score is low for google-like findings', () => {
+    it('pristine site with only a few config issues is low/info', () => {
+        const vulns = [
+            { type: 'missing_security_header', severity: 'info' },
+            { type: 'missing_security_header', severity: 'info' },
+            { type: 'missing_security_header', severity: 'info' },
+            { type: 'info_disclosure', severity: 'info' },
+        ];
+        const { score, level } = computeRiskScore(vulns);
+        expect(score).toBeLessThanOrEqual(5);
+        expect(level).toBe('info');
+    });
+
+    it('missing security headers + insecure cookies is at most low', () => {
         const vulns = [
             { type: 'missing_security_header', severity: 'medium' },
             { type: 'missing_security_header', severity: 'low' },
@@ -94,7 +79,7 @@ describe('Google — pristine homepage (no vulns expected)', () => {
         expect(level).toBe('low');
     });
 
-    it('no active vulns = not high or critical', () => {
+    it('no active vulns means no high/critical level', () => {
         const configOnly = [
             { type: 'missing_security_header', severity: 'medium' },
             { type: 'insecure_cookie', severity: 'medium' },
@@ -107,10 +92,10 @@ describe('Google — pristine homepage (no vulns expected)', () => {
     });
 });
 
-describe('Genuinely vulnerable site simulation', () => {
+describe('computeRiskScore — active vulns drive the score', () => {
     const { computeRiskScore } = require('../scanner');
 
-    it('SQLi + XSS = critical risk', () => {
+    it('SQLi + XSS pushes the level to high', () => {
         const vulns = [
             { type: 'sql_injection', severity: 'critical' },
             { type: 'xss', severity: 'high' },
@@ -121,7 +106,7 @@ describe('Genuinely vulnerable site simulation', () => {
         expect(level).toBe('high');
     });
 
-    it('multiple SQLi findings = medium risk (diminishing returns per type)', () => {
+    it('repeated same-type findings have diminishing returns', () => {
         const vulns = [
             { type: 'sql_injection', severity: 'critical' },
             { type: 'sql_injection', severity: 'critical' },
@@ -133,46 +118,32 @@ describe('Genuinely vulnerable site simulation', () => {
     });
 });
 
-describe('False positive regression tests', () => {
+describe('computeRiskScore — configuration semantics', () => {
     const { computeRiskScore, checkCspValue } = require('../scanner');
 
     it('CSP with default-src self is clean', () => {
         expect(checkCspValue("default-src 'self'")).toEqual([]);
     });
 
-    it('crossdomain.xml without wildcard is clean', () => {
-        const vulns = [
+    it('crossdomain.xml without wildcard stays info', () => {
+        const { score } = computeRiskScore([
             { type: 'sensitive_file_disclosure', severity: 'info' },
-        ];
-        const { score } = computeRiskScore(vulns);
+        ]);
         expect(score).toBeLessThanOrEqual(2);
     });
 
-    it('__Secure- cookie missing HttpOnly is clean', () => {
-        const vulns = [
+    it('__Secure- cookie missing HttpOnly is still scored', () => {
+        const { score } = computeRiskScore([
             { type: 'insecure_cookie', severity: 'medium' },
-        ];
-        const { score } = computeRiskScore(vulns);
+        ]);
         expect(score).toBeGreaterThanOrEqual(0);
-    });
-
-    it('pristine site with only a few config issues stays low', () => {
-        const vulns = [
-            { type: 'missing_security_header', severity: 'info' },
-            { type: 'missing_security_header', severity: 'info' },
-            { type: 'missing_security_header', severity: 'info' },
-            { type: 'info_disclosure', severity: 'info' },
-        ];
-        const { score, level } = computeRiskScore(vulns);
-        expect(score).toBeLessThanOrEqual(5);
-        expect(level).toBe('info');
     });
 });
 
 describe('Categorization consistency', () => {
     const { computeRiskScore } = require('../scanner');
 
-    it('same total vulns but all config vs all active gives very different scores', () => {
+    it('all-config vs all-active findings give very different scores', () => {
         const configScore = computeRiskScore([
             { type: 'missing_security_header', severity: 'medium' },
             { type: 'missing_security_header', severity: 'medium' },
@@ -188,5 +159,20 @@ describe('Categorization consistency', () => {
             { type: 'sql_injection', severity: 'critical' },
         ]);
         expect(activeScore.score).toBeGreaterThan(configScore.score * 2);
+    });
+
+    it('categorize() buckets finding types consistently', () => {
+        const counts = categorize([
+            { type: 'sql_injection', severity: 'critical' },
+            { type: 'open_redirect', severity: 'medium' },
+            { type: 'xss', severity: 'info' },
+            { type: 'sensitive_file_disclosure', severity: 'high' },
+            { type: 'missing_security_header', severity: 'medium' },
+        ]);
+        expect(counts.active).toBe(1);
+        expect(counts.redirect).toBe(1);
+        expect(counts.info).toBe(1);
+        expect(counts.exposure).toBe(1);
+        expect(counts.config).toBe(1);
     });
 });

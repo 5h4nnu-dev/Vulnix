@@ -1,7 +1,7 @@
 {
-  "name": "secureprobe",
-  "version": "2.1.0",
-  "description": "SecureProbe — Automated web security vulnerability scanner with detailed reports",
+  "name": "vulnix",
+  "version": "3.0.0",
+  "description": "Vulnix — AI-assisted web security vulnerability scanner for authorized testing, with autonomous agent mode, prompt-injection detection, and DOCX/Markdown reports",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -20,6 +20,7 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^12.10.0",
+    "docx": "^9.9.0",
     "express": "^4.21.0",
     "uuid": "^11.1.0"
   },

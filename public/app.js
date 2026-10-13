@@ -139,12 +139,25 @@ async function startScan() {
   const url = urlInput.value.trim();
   if (!url) { urlInput.focus(); return; }
 
+  const mode = $('#scan-mode') ? $('#scan-mode').value : 'deterministic';
+  const useAi = mode !== 'deterministic';
+  const authorized = $('#opt-authorized') ? $('#opt-authorized').checked : false;
+
+  if (useAi && !authorized) {
+    alert('AI/autonomous modes require you to confirm authorization. Tick "I am authorized to test this target".');
+    return;
+  }
+
   const options = {
     checkHeaders: $('#opt-headers').checked,
     checkCors: $('#opt-cors').checked,
     checkSqlInjection: $('#opt-sqli').checked,
     checkXss: $('#opt-xss').checked,
     checkOpenRedirect: $('#opt-redirect').checked,
+    checkCommandInjection: $('#opt-cmdi') ? $('#opt-cmdi').checked : true,
+    checkPathTraversal: $('#opt-traversal') ? $('#opt-traversal').checked : true,
+    checkSsrf: $('#opt-ssrf') ? $('#opt-ssrf').checked : true,
+    checkPromptInjection: $('#opt-promptinj') ? $('#opt-promptinj').checked : true,
     checkHttpMethods: $('#opt-methods').checked,
     checkRateLimit: $('#opt-ratelimit').checked,
     checkSensitiveFiles: $('#opt-files').checked,
@@ -155,7 +168,7 @@ async function startScan() {
   btn.innerHTML = `<span class="pulse-dot"></span> Scanning…`;
 
   try {
-    const scan = await api('POST', '/scans', { url, options });
+    const scan = await api('POST', '/scans', { url, options, mode, useAi, authorized });
     currentScanId = scan.id;
 
     const progressCard = $('#scan-progress-card');
@@ -258,13 +271,21 @@ async function loadScanDetail(scanId) {
   const vulnsContainer = $('#detail-vulns-section');
   const payloadsContainer = $('#detail-payloads-section');
   const eventsContainer = $('#detail-events-section');
+  const piContainer = $('#detail-promptinj-section');
+  const agentContainer = $('#detail-agent-section');
+  const aiPayContainer = $('#detail-aipayloads-section');
   infoContainer.innerHTML = '<div class="empty-state">Loading…</div>';
   vulnsContainer.innerHTML = '';
   payloadsContainer.innerHTML = '';
   eventsContainer.innerHTML = '';
+  if (piContainer) piContainer.innerHTML = '';
+  if (agentContainer) agentContainer.innerHTML = '';
+  if (aiPayContainer) aiPayContainer.innerHTML = '';
 
   try {
     const { scan, vulnerabilities, events } = await api('GET', `/scans/${scanId}`);
+    const vulnList = (vulnerabilities || []).filter((v) => v.kind !== 'hardening');
+    const hardeningList = (vulnerabilities || []).filter((v) => v.kind === 'hardening');
 
     infoContainer.innerHTML = `
       <div class="detail-info-grid">
@@ -292,27 +313,60 @@ async function loadScanDetail(scanId) {
           <div class="detail-info-label">Completed</div>
           <div class="detail-info-value" style="font-size:0.8rem">${formatDate(scan.completed_at)}</div>
         </div>
+        <div class="detail-info-item">
+          <div class="detail-info-label">Scan Mode</div>
+          <div class="detail-info-value">
+            <span class="badge badge-info">${escapeHtml(scan.mode || 'deterministic')}</span>
+            ${scan.use_ai ? '<span class="badge badge-medium">AI</span>' : ''}
+          </div>
+        </div>
+        ${scan.llm_model ? `
+        <div class="detail-info-item">
+          <div class="detail-info-label">Model</div>
+          <div class="detail-info-value" style="font-size:0.8rem">${escapeHtml(scan.llm_model)}</div>
+        </div>` : ''}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
         ${scan.critical_count ? `<span class="badge badge-critical">${scan.critical_count} Critical</span>` : ''}
         ${scan.high_count ? `<span class="badge badge-high">${scan.high_count} High</span>` : ''}
         ${scan.medium_count ? `<span class="badge badge-medium">${scan.medium_count} Medium</span>` : ''}
         ${scan.low_count ? `<span class="badge badge-low">${scan.low_count} Low</span>` : ''}
+        ${scan.hardening_count ? `<span class="badge badge-info">${scan.hardening_count} Hardening</span>` : ''}
+        ${scan.prompt_injection_count ? `<span class="badge badge-critical">${scan.prompt_injection_count} Prompt-Injection</span>` : ''}
       </div>
+      ${scan.executive_summary ? `
+      <div class="card exec-summary-card" style="margin-bottom:16px">
+        <div class="card-body">
+          <h2 style="font-size:0.85rem;font-weight:700;margin:0 0 10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em">Executive Summary</h2>
+          <div class="vuln-section-content">${escapeHtml(scan.executive_summary)}</div>
+        </div>
+      </div>` : ''}
     `;
 
-    if (vulnerabilities && vulnerabilities.length > 0) {
+    if (vulnList.length > 0) {
       vulnsContainer.innerHTML = `
         <h2 style="font-size:0.85rem;font-weight:700;margin:22px 0 14px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em">
-          Vulnerabilities (${vulnerabilities.length})
+          Vulnerabilities (${vulnList.length})
         </h2>
-        ${vulnerabilities.map((v, i) => renderVulnCard(v, i)).join('')}
+        ${vulnList.map((v, i) => renderVulnCard(v, i)).join('')}
+        ${hardeningList.length > 0 ? `
+          <h2 style="font-size:0.85rem;font-weight:700;margin:22px 0 14px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em">
+            Hardening Gaps (${hardeningList.length})
+          </h2>
+          ${hardeningList.map((v, i) => renderVulnCard(v, i + vulnList.length)).join('')}
+        ` : ''}
       `;
     } else {
       vulnsContainer.innerHTML = `
         <div class="card" style="margin-top:22px">
           <div class="card-body">
             <div class="empty-state" style="color:var(--success)">No vulnerabilities found!</div>
+            ${hardeningList.length > 0 ? `
+              <h2 style="font-size:0.85rem;font-weight:700;margin:16px 0 10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em">
+                Hardening Gaps (${hardeningList.length})
+              </h2>
+              ${hardeningList.map((v, i) => renderVulnCard(v, i)).join('')}
+            ` : ''}
           </div>
         </div>
       `;
@@ -339,11 +393,95 @@ async function loadScanDetail(scanId) {
       loadPayloads(scanId, payloadsContainer);
     }
 
+    // AI result panels (defensive: older scans have none)
+    loadAiPanels(scanId, scan, {
+      promptInjection: piContainer,
+      agent: agentContainer,
+      aiPayloads: aiPayContainer,
+    });
+
     if (scan.status === 'running' || scan.status === 'pending') {
       startDetailPolling(scanId);
     }
   } catch (err) {
     infoContainer.innerHTML = `<div class="empty-state">Failed to load: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function loadAiPanels(scanId, scan, containers) {
+  try {
+    const [pi, agent, ai] = await Promise.all([
+      api('GET', `/scans/${scanId}/prompt-injection`).catch(() => ({ tests: [] })),
+      api('GET', `/scans/${scanId}/agent-trace`).catch(() => ({ steps: [] })),
+      api('GET', `/scans/${scanId}/ai-payloads`).catch(() => ({ ai_payloads: [] })),
+    ]);
+
+    if (containers.promptInjection && pi.tests && pi.tests.length > 0) {
+      const detected = pi.tests.filter((t) => t.detected).length;
+      containers.promptInjection.innerHTML = `
+        <div class="ai-panel card">
+          <div class="card-body">
+            <h2 class="ai-panel-title">🧪 Prompt-Injection Tests (${pi.tests.length})</h2>
+            <div class="ai-panel-subtitle">${detected} confirmed · target-side instruction-hijack checks</div>
+            <table class="ai-table">
+              <thead><tr><th>Endpoint</th><th>Technique</th><th>Detected</th></tr></thead>
+              <tbody>
+                ${pi.tests.map((t) => `
+                  <tr>
+                    <td class="mono">${escapeHtml(truncateUrl(t.endpoint, 60))}</td>
+                    <td>${escapeHtml(t.technique)}</td>
+                    <td>${t.detected ? '<span class="badge badge-critical">YES</span>' : '<span class="badge badge-info">no</span>'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    if (containers.agent && agent.steps && agent.steps.length > 0) {
+      containers.agent.innerHTML = `
+        <div class="ai-panel card">
+          <div class="card-body">
+            <h2 class="ai-panel-title">🧭 Agent Action Trace (${agent.steps.length} steps)</h2>
+            <div class="ai-panel-subtitle">Autonomous plan → act → observe history</div>
+            <div class="agent-trace">
+              ${agent.steps.map((s) => `
+                <div class="agent-step ${s.injection_flagged ? 'flagged' : ''}">
+                  <span class="agent-step-no">#${s.step_no}</span>
+                  <span class="agent-step-action">${escapeHtml(s.action)}</span>
+                  ${s.injection_flagged ? '<span class="badge badge-critical">injection blocked</span>' : ''}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (containers.aiPayloads && ai.ai_payloads && ai.ai_payloads.length > 0) {
+      containers.aiPayloads.innerHTML = `
+        <div class="ai-panel card">
+          <div class="card-body">
+            <h2 class="ai-panel-title">🤖 AI-Generated Payloads (${ai.ai_payloads.length})</h2>
+            <div class="ai-panel-subtitle">Payloads written by the model for this target</div>
+            ${ai.ai_payloads.map((p) => `
+              <div class="ai-payload-item">
+                <div class="ai-payload-head">
+                  <span class="badge badge-info">${escapeHtml(p.vuln_type)}</span>
+                  ${p.model ? `<span class="ai-payload-model">${escapeHtml(p.model)}</span>` : ''}
+                </div>
+                <pre class="payload-code">${escapeHtml(p.payload)}</pre>
+                ${p.rationale ? `<div class="payload-desc">${escapeHtml(p.rationale)}</div>` : ''}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+  } catch (err) {
+    console.error('Failed to load AI panels:', err);
   }
 }
 
@@ -358,6 +496,7 @@ function renderVulnCard(v, index) {
         </div>
         <div class="vuln-card-badges">
           ${severityBadge(v.severity)}
+          ${v.kind === 'hardening' ? '<span class="badge badge-info">Hardening</span>' : ''}
           ${v.cvss_score != null ? `<span class="badge badge-info">CVSS ${v.cvss_score}</span>` : ''}
         </div>
       </div>
@@ -558,13 +697,42 @@ $('#btn-download-report').addEventListener('click', async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `neosec-report-${currentScanId.slice(0, 8)}.md`;
+    a.download = `vulnix-report-${currentScanId.slice(0, 8)}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   } catch (err) {
     alert('Download failed: ' + err.message);
+  }
+});
+
+$('#btn-download-docx').addEventListener('click', async () => {
+  if (!currentScanId) return;
+  const btn = $('#btn-download-docx');
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = 'Generating…';
+  try {
+    const resp = await fetch(`/api/scans/${currentScanId}/report.docx`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: 'Failed to generate DOCX report' }));
+      throw new Error(err.error || 'Failed to generate DOCX report');
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vulnix-report-${currentScanId.slice(0, 8)}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('DOCX download failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
   }
 });
 
@@ -748,13 +916,13 @@ function typeWrite(element, text, speed = 25) {
 
 async function bootSequence() {
   const bootLines = [
-    'INITIALIZING NEOSEC SECURITY KERNEL...',
-    'LOADING PAYLOAD DATABASE [260 MODULES]... OK',
-    'ESTABLISHING SECURE ENCRYPTION CHANNEL... OK',
-    'ARMING VULNERABILITY DETECTION ENGINE... OK',
-    'CALIBRATING SCAN PROTOCOLS... OK',
-    'SYNCHRONIZING THREAT INTELLIGENCE... OK',
-    'SYSTEM READY — ENTERING SECURE MODE.',
+    'INITIALIZING SECURITY CONSOLE...',
+    'LOADING PAYLOAD DATABASE...',
+    'STARTING DETERMINISTIC SCAN ENGINE...',
+    'CHECKING AI PROVIDER STATUS...',
+    'PREPARING SCAN INTERFACE...',
+    'SYNCHRONIZING INTERFACE STATE...',
+    'SYSTEM READY.',
   ];
 
   for (let i = 0; i < bootLines.length; i++) {
@@ -794,12 +962,35 @@ function updateClock() {
   }
 }
 
+async function fetchAiStatus() {
+  const chip = document.getElementById('ai-status-chip');
+  const text = document.getElementById('ai-status-text');
+  if (!chip || !text) return;
+  try {
+    const status = await api('GET', '/ai/status');
+    if (!status.enabled) {
+      chip.classList.add('ai-off');
+      text.textContent = 'AI disabled — deterministic mode';
+    } else if (status.reachable) {
+      chip.classList.add('ai-on');
+      text.textContent = `AI: ${status.provider} · ${status.model || `${status.models.length} models`}`;
+    } else {
+      chip.classList.add('ai-off');
+      text.textContent = `AI unreachable (${status.provider})`;
+    }
+  } catch {
+    chip.classList.add('ai-off');
+    text.textContent = 'AI status unavailable';
+  }
+}
+
 async function init() {
   await bootSequence();
   MatrixRain.init();
   ParticleNetwork.init();
   setInterval(updateClock, 1000);
   updateClock();
+  fetchAiStatus();
   navigateTo('dashboard');
 
   const toggle = document.getElementById('matrix-toggle');

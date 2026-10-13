@@ -1,9 +1,11 @@
 #!/bin/bash
-# SecureProbe Real-World Benchmark
-# Tests both well-secured and intentionally vulnerable websites
+# Vulnix Benchmark
+# Can only be run against targets you are authorized to test
+# (local instances of intentionally vulnerable apps, your own infrastructure,
+# or targets with explicit written permission).
 
-SERVER_URL="http://localhost:3000"
-RESULTS_DIR="/tmp/secureprobe-benchmark"
+SERVER_URL="http://localhost:5000"
+RESULTS_DIR="/tmp/vulnix-benchmark"
 mkdir -p "$RESULTS_DIR"
 
 SECURE_SITES=(
@@ -19,7 +21,7 @@ VULNERABLE_SITES=(
 
 echo ""
 echo "══════════════════════════════════════════════════════════════════"
-echo "  SecureProbe v2.1 — Real-World Benchmark"
+echo "  Vulnix — Benchmark (authorized targets only)"
 echo "══════════════════════════════════════════════════════════════════"
 echo ""
 echo "  Testing on:"
@@ -159,7 +161,7 @@ for site in "${VULNERABLE_SITES[@]}"; do
     else
         sc="?"; lv="?"; ct="?"
     fi
-    printf "  │ %-27s │ %5s │ %-8s │ %8s │\n" "$site" "$lv" "$ct"
+    printf "  │ %-27s │ %5s │ %-8s │ %8s │\n" "$site" "$sc" "$lv" "$ct"
 done
 
 echo "  └─────────────────────────────┴───────┴──────────┴──────────┘"

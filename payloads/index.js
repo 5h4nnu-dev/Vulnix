@@ -17,6 +17,7 @@ const pathTraversal = require('./path-traversal');
 const ssrf = require('./ssrf');
 const csrf = require('./csrf');
 const headerInjection = require('./header-injection');
+const promptInjection = require('./prompt-injection');
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const VULN_TYPE_MAP = {
     ssrf,
     csrf,
     header_injection: headerInjection,
+    prompt_injection: promptInjection,
 
     // Aliases — map scanner vuln types to related payload modules
     missing_security_header: headerInjection,
@@ -58,6 +60,7 @@ const ALL_MODULES = [
     ssrf,
     csrf,
     headerInjection,
+    promptInjection,
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -240,5 +243,6 @@ module.exports = {
         ssrf,
         csrf,
         headerInjection,
+        promptInjection,
     },
 };

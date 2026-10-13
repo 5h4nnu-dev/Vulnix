@@ -30,6 +30,24 @@ jest.mock('../database', () => {
 const request = require('supertest');
 const app = require('../server');
 
+// The scanner performs real HTTP requests. We must NOT allow the test suite to
+// dial external hosts (the background scan of the POST /api/scans happy path
+// would otherwise hit example.com). A hermetic mock keeps the suite offline
+// and deterministic.
+beforeAll(() => {
+    global.fetch = jest.fn(async () => ({
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+        text: async () => '<html><head></head><body><p>mock target</p></body></html>',
+        arrayBuffer: async () => new ArrayBuffer(0),
+    }));
+});
+
+afterAll(() => {
+    delete global.fetch;
+});
+
 describe('POST /api/scans', () => {
     it('rejects missing URL', async () => {
         const res = await request(app)
@@ -126,5 +144,51 @@ describe('DELETE /api/scans/:id', () => {
         await request(app)
             .delete('/api/scans/test-id')
             .expect(204);
+    });
+});
+
+describe('POST /api/prompt-injection/test', () => {
+    it('rejects missing URL', async () => {
+        const res = await request(app)
+            .post('/api/prompt-injection/test')
+            .send({})
+            .expect(400);
+        expect(res.body.error).toBe('url is required');
+    });
+
+    it('rejects an invalid URL', async () => {
+        const res = await request(app)
+            .post('/api/prompt-injection/test')
+            .send({ url: 'not a url' })
+            .expect(400);
+        expect(res.body.error).toBe('Invalid URL');
+    });
+
+    it('blocks out-of-scope targets', async () => {
+        const res = await request(app)
+            .post('/api/prompt-injection/test')
+            .send({ url: 'http://169.254.169.254/latest/meta-data/', authorized: true })
+            .expect(403);
+        expect(res.body.error).toMatch(/not allowed|metadata/i);
+    });
+
+    it('requires explicit authorization', async () => {
+        const res = await request(app)
+            .post('/api/prompt-injection/test')
+            .send({ url: 'https://example.com' })
+            .expect(403);
+        expect(res.body.error).toMatch(/Authorization required/);
+    });
+
+    it('runs canary probes for an authorized endpoint', async () => {
+        const res = await request(app)
+            .post('/api/prompt-injection/test')
+            .send({ url: 'https://example.com', authorized: true })
+            .expect(200);
+        expect(res.body.url).toBe('https://example.com');
+        expect(res.body.canary).toMatch(/^VULNIX-CANARY-/);
+        expect(res.body.detected).toBe(0);
+        expect(Array.isArray(res.body.tests)).toBe(true);
+        expect(res.body.tests.length).toBeGreaterThan(0);
     });
 });
