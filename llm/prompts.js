@@ -114,7 +114,14 @@ Respond with ONLY this JSON object:
   "args": { ... }
 }
 To finish, use:
-{ "thought": "<reasoning>", "action": "finish", "args": { "summary": "<summary>" } }`;
+{ "thought": "<reasoning>", "action": "finish", "args": { "summary": "<summary>" } }
+
+MANDATORY WORKFLOW:
+- Turn 1: If no endpoints/params are known from the initial message, call crawl(path: "/") and DO NOT finish.
+- Enumerate endpoints and parameters. For each parameter you haven't tested, call test_parameter with vuln_type in {sql_injection, xss} (and others only if justified). Prefer GET endpoints first.
+- Only call record_finding if the most recent test_parameter observation shows result.vulnerable === true and includes concrete evidence. Set evidence to that concrete evidence.
+- Do NOT call record_finding based on guesses, http_request body text alone, or generic observations.
+- Call finish only after you have enumerated and tested plausible parameters for discovered endpoints, or budget is exhausted.`;
 
 const PROMPT_INJECTION_SYSTEM = `You are analyzing whether a target web
 application's AI/LLM feature is vulnerable to prompt injection.

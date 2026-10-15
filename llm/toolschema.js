@@ -45,7 +45,7 @@ const TOOLS = {
         },
     },
     record_finding: {
-        description: 'Record a confirmed vulnerability. Only call this after observing real evidence.',
+        description: 'Record a confirmed vulnerability. Only call this after observing real evidence (recent test_parameter returned result.vulnerable===true).',
         parameters: {
             type: { type: 'string', required: true },
             severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], required: true },
@@ -53,7 +53,7 @@ const TOOLS = {
             description: { type: 'string', required: true },
             endpoint: { type: 'string', required: true },
             payload: { type: 'string', required: false },
-            evidence: { type: 'string', required: false },
+            evidence: { type: 'string', required: true },
             remediation: { type: 'string', required: false },
         },
     },

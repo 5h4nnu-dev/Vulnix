@@ -407,14 +407,22 @@ async function execute(name, args, state) {
         }
 
         case 'record_finding': {
+            let hasEvidence = false;
+            const obs = state.lastTest && state.lastTest.observation ? state.lastTest.observation : null;
+            if (obs && obs.result && obs.result.vulnerable === true) hasEvidence = true;
+            if (a && a.evidence && String(a.evidence).trim().length > 0) hasEvidence = true;
+            if (!hasEvidence) {
+                return { ok: false, error: 'no concrete evidence from a recent test_parameter result (result.vulnerable===true) or evidence field' };
+            }
+
             const finding = {
                 type: a.type,
                 severity: a.severity || 'medium',
                 title: a.title,
                 description: a.description,
                 affectedEndpoint: a.endpoint,
-                payload: a.payload || null,
-                evidence: a.evidence || null,
+                payload: a.payload || (obs && obs.result && obs.result.evidence ? null : (state.lastTest && state.lastTest.args && state.lastTest.args.payload) || null),
+                evidence: a.evidence || (obs && obs.result && (obs.result.evidence || `vulnerable:true via ${obs.result.technique || 'detector'}`)) || 'detector-reported evidence',
                 remediation: a.remediation || 'Review and remediate according to the finding type.',
                 source: 'ai',
             };
