@@ -12,6 +12,8 @@
  * over its budget/cancellation-aware `fetchSafe` (no fetch happens out-of-band).
  */
 
+const { parseHtml } = require('./surfaces');
+
 const UA = 'SecureProbe/2.0';
 
 function simpleHash(str) {
@@ -164,6 +166,43 @@ async function runRecon(url, fetchFn = global.fetch, opts = {}) {
         const discovery = await discoverEndpoints(url, body, fetchFn, opts);
         result.endpoints = discovery.endpoints;
         result.discoveredScripts = discovery.scripts;
+        // Structural surfaces (cheerio): links carrying parameters and forms.
+        // These feed the type-appropriate surface fuzzer in scanner.js.
+        result.links = discovery.links;
+        result.forms = discovery.forms;
+
+        // Recursive crawl to discover endpoints on same-origin secondary pages
+        try {
+            const crawlOpts = {
+                maxDepth: opts.maxDepth,
+                maxVisited: opts.maxVisited,
+                maxScripts: opts.maxScripts,
+                ...opts.crawl
+            };
+            const crawled = await crawlEndpoints(url, body, fetchFn, crawlOpts);
+            if (Array.isArray(crawled.endpoints)) {
+                const all = new Map();
+                (result.endpoints || []).forEach(e => { const k = (e.path||'').toString(); if (k) all.set(k, e); });
+                crawled.endpoints.forEach(e => { const k = (e.path||'').toString(); if (!all.has(k)) all.set(k, e); });
+                result.endpoints = Array.from(all.values());
+            }
+            if (Array.isArray(crawled.links)) result.links = result.links ? result.links.concat(crawled.links) : crawled.links;
+            if (Array.isArray(crawled.forms)) result.forms = result.forms ? result.forms.concat(crawled.forms) : crawled.forms;
+            if (crawled.scripts) result.discoveredScripts = result.discoveredScripts ? result.discoveredScripts.concat(crawled.scripts) : crawled.scripts;
+        } catch { /* ignore */ }
+
+        // Bounded common-path probing
+        try {
+            if (opts.probeCommon) {
+                const probed = await probeCommonPaths(url, fetchFn, opts);
+                if (Array.isArray(probed.endpoints)) {
+                    const all = new Map();
+                    (result.endpoints || []).forEach(e => { const k = (e.path||'').toString(); if (k) all.set(k, e); });
+                    probed.endpoints.forEach(e => { const k = (e.path||'').toString(); if (!all.has(k)) all.set(k, e); });
+                    result.endpoints = Array.from(all.values());
+                }
+            }
+        } catch { /* ignore */ }
     }
 
     return result;
@@ -297,6 +336,19 @@ async function discoverEndpoints(baseUrl, body, fetchFn = global.fetch, opts = {
 
     let scripts = 0;
     mine(String(body || ''), baseUrl);
+
+    // Structural mining with cheerio (in addition to the regex pass above):
+    // link/area/iframe hrefs and form actions become API candidates when they
+    // look like input surfaces, and are always reported as `links`/`forms` so
+    // the surface fuzzer can test their parameters.
+    const parsed = parseHtml(body, baseUrl);
+    for (const link of parsed.links) {
+        add(link.path, link.params, 'html');
+    }
+    for (const form of parsed.forms) {
+        add(form.path, form.params, 'html');
+    }
+
     for (const scriptUrl of extractScriptSrcs(body, baseUrl).slice(0, maxScripts)) {
         const resp = await fetchFn(scriptUrl, { method: 'GET', headers: { 'User-Agent': UA } }, 10000);
         if (!resp) continue;
@@ -309,7 +361,94 @@ async function discoverEndpoints(baseUrl, body, fetchFn = global.fetch, opts = {
         .map(([path, info]) => ({ path, params: Array.from(info.params), source: info.source }))
         .sort((a, b) => scoreEndpoint(b.path) - scoreEndpoint(a.path));
 
-    return { endpoints, scripts };
+    return { endpoints, scripts, links: parsed.links, forms: parsed.forms };
+}
+
+async function crawlEndpoints(baseUrl, startBody, fetchFn = global.fetch, opts = {}) {
+    const maxDepth = opts.maxDepth != null ? opts.maxDepth : 1;
+    const maxVisited = opts.maxVisited != null ? opts.maxVisited : 30;
+    if (maxDepth < 1) return { endpoints: [], links: [], forms: [], scripts: 0 };
+    const base = new URL(baseUrl);
+    const visited = new Set([base.toString()]);
+    const queue = [];
+    try {
+        const dom = parseHtml(startBody, baseUrl);
+        for (const link of dom.links || []) {
+            try {
+                const u = new URL(link.url);
+                if (u.hostname === base.hostname && u.port === base.port) {
+                    if (!visited.has(u.toString())) {
+                        visited.add(u.toString());
+                        queue.push({ url: u.toString(), depth: 1 });
+                    }
+                }
+            } catch { /* ignore */ }
+        }
+    } catch { /* ignore */ }
+    const endpointsMap = new Map();
+    const links = [];
+    const forms = [];
+    let scripts = 0;
+    while (queue.length > 0 && visited.size <= maxVisited) {
+        const item = queue.shift();
+        if (!item || item.depth >= maxDepth) continue;
+        try {
+            const resp = await fetchFn(item.url, { method: 'GET', headers: { 'User-Agent': UA } }, 10000);
+            if (!resp) continue;
+            const body = await resp.text().catch(() => '');
+            const dom = parseHtml(body, item.url);
+            for (const link of dom.links || []) links.push(link);
+            for (const form of dom.forms || []) forms.push(form);
+            const disc = await discoverEndpoints(item.url, body, fetchFn, { maxScripts: opts.maxScripts || 0 });
+            for (const e of disc.endpoints || []) {
+                if (!endpointsMap.has(e.path)) endpointsMap.set(e.path, e);
+            }
+            scripts += disc.scripts || 0;
+            for (const link of dom.links || []) {
+                try {
+                    const u = new URL(link.url);
+                    if (u.hostname === base.hostname && u.port === base.port) {
+                        const key = u.toString();
+                        if (!visited.has(key)) {
+                            visited.add(key);
+                            if (visited.size > maxVisited) break;
+                            queue.push({ url: key, depth: item.depth + 1 });
+                        }
+                    }
+                } catch { /* ignore */ }
+            }
+            if (visited.size > maxVisited) break;
+        } catch { /* ignore */ }
+    }
+    return { endpoints: Array.from(endpointsMap.values()), links, forms, scripts };
+}
+
+async function probeCommonPaths(baseUrl, fetchFn = global.fetch, opts = {}) {
+    const commonPaths = opts.commonPaths || ['/login', '/signin', '/register', '/api'];
+    const max = opts.maxProbesPerEndpoint != null ? opts.maxProbesPerEndpoint : 4;
+    const endpointsMap = new Map();
+    let base;
+    try { base = new URL(baseUrl); } catch { return { endpoints: [] }; }
+    const toProbe = commonPaths.slice(0, max);
+    for (const p of toProbe) {
+        try {
+            const url = new URL(p, base);
+            if (url.hostname !== base.hostname || url.port !== base.port) continue;
+            const resp = await fetchFn(url.toString(), { method: 'GET', headers: { 'User-Agent': UA } }, 8000);
+            if (!resp) continue;
+            const body = await resp.text().catch(() => '');
+            const dom = parseHtml(body, url.toString());
+            const path = url.pathname;
+            if (!endpointsMap.has(path)) endpointsMap.set(path, { path, params: [], source: 'probe' });
+            for (const link of dom.links || []) {
+                if (!endpointsMap.has(link.path)) endpointsMap.set(link.path, { path: link.path, params: link.params, source: 'probe' });
+            }
+            for (const form of dom.forms || []) {
+                if (!endpointsMap.has(form.path)) endpointsMap.set(form.path, { path: form.path, params: form.params, source: 'probe' });
+            }
+        } catch { /* ignore */ }
+    }
+    return { endpoints: Array.from(endpointsMap.values()) };
 }
 
 module.exports = {
@@ -325,4 +464,6 @@ module.exports = {
     extractApiPathTokens,
     extractScriptSrcs,
     discoverEndpoints,
+    crawlEndpoints,
+    probeCommonPaths,
 };

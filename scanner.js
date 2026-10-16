@@ -4,6 +4,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const payloadEngine = require('./payloads');
 const config = require('./config');
 const recon = require('./recon');
+const surfaces = require('./surfaces');
 const payloadGenerator = require('./llm/payloadGenerator');
 const analyst = require('./llm/analyst');
 const summaryGen = require('./llm/summary');
@@ -41,6 +42,17 @@ const TRAVERSAL_PAYLOADS = [
 const SSRF_PAYLOADS = [
     ...payloadEngine.getPayloadsByType('ssrf', 'basic').map(p => p.payload),
     ...(payloadEngine.getPayloadsByType('ssrf', 'filter_bypass')?.slice(0, 2).map(p => p.payload) || []),
+];
+
+// Every stage name runDeterministic can report. Used as the progress "total"
+// (an upper bound — conditional stages may be skipped) so the advertised count
+// can never drift from the runner when a phase is added or removed.
+const SCAN_STAGES = [
+    'initialization', 'tech_fingerprint', 'headers_analysis', 'cors_analysis',
+    'sql_injection', 'xss', 'open_redirect', 'command_injection',
+    'path_traversal', 'ssrf', 'api_endpoints', 'prompt_injection',
+    'surface_fuzz', 'http_methods', 'file_discovery', 'rate_limit',
+    'finalization',
 ];
 
 // Prompt-injection templates: static fallback payloads and the dedupe source
@@ -204,6 +216,54 @@ function headersToObj(headers) {
     const obj = {};
     headers.forEach((v, k) => { obj[k] = v; });
     return obj;
+}
+
+// Resolve the parameters a detector should inject into. Historically the
+// candidates came from the URL's query string; discovered POST surfaces carry
+// their fields in the body instead, so callers may pass an explicit list via
+// `opts.inject.paramCandidates`. Injection controls are namespaced under
+// `opts.inject` so a scan-options object (passed as `opts` by the root battery)
+// can never be mistaken for per-surface instructions.
+function resolveParamCandidates(url, opts, fallback) {
+    const inject = (opts && opts.inject) || {};
+    if (Array.isArray(inject.paramCandidates) && inject.paramCandidates.length > 0) {
+        return inject.paramCandidates;
+    }
+    const params = Array.from(new URL(url).searchParams.keys());
+    return params.length > 0 ? params : fallback;
+}
+
+// Build the request that places `payload` into `param`. With no
+// `opts.inject.method` this reproduces the historical GET-with-query behaviour
+// byte-for-byte. For a discovered POST form (`opts.inject.method === 'post'`)
+// the surface's fields are sent as an application/x-www-form-urlencoded body
+// with `param` set to the payload, so POST-only endpoints are actually
+// exercised instead of approximated as GET.
+function buildInjectionRequest(url, param, payload, opts = {}, extraInit = {}) {
+    const inject = opts.inject || {};
+    if (String(inject.method || 'get').toLowerCase() === 'post') {
+        const fields = { ...(inject.formFields || {}) };
+        fields[param] = payload;
+        return {
+            url,
+            init: {
+                method: 'POST',
+                headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams(fields).toString(),
+                ...extraInit,
+            },
+        };
+    }
+    const target = new URL(url);
+    target.searchParams.set(param, payload);
+    return { url: target.toString(), init: { headers: { 'User-Agent': UA }, ...extraInit } };
+}
+
+// Merge a surface's AI-written open-redirect payloads into the detector opts
+// (the detector already has its own fixed payload list).
+function withOpenRedirectPayloads(opts, payloads) {
+    const base = opts || {};
+    return { ...base, inject: { ...(base.inject || {}), extraPayloads: payloads } };
 }
 
 function headersToString(headers) {
@@ -396,7 +456,24 @@ function addEvent(scanId, stage, eventType, title, description, extras = {}) {
     });
 }
 
+// Production scans (runScan) dedupe identical findings that more than one phase
+// can legitimately observe — e.g. the root injection battery and the discovered
+// surface pass can both report the same class on the same endpoint/payload. The
+// set is only created inside runScan(), so unit tests that drive detectors or
+// runDeterministic directly keep their exact insertVuln call counts.
+const recordedFindings = new Map(); // scanId -> Set<key>
+
+function findingKey(vuln) {
+    return [vuln.type, vuln.title, vuln.affectedEndpoint, vuln.payload ?? ''].join('\u0000');
+}
+
 function addVuln(scanId, vuln) {
+    const seen = recordedFindings.get(scanId);
+    if (seen) {
+        const key = findingKey(vuln);
+        if (seen.has(key)) return;
+        seen.add(key);
+    }
     stmts.insertVuln.run({
         id: uuid(),
         scan_id: scanId,
@@ -675,9 +752,7 @@ const SQL_ERROR_PATTERNS = [
 ];
 
 async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], opts = {}) {
-    const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : SQLI_GUESS;
+    const candidates = resolveParamCandidates(url, opts, SQLI_GUESS);
 
     let baselineBody = typeof opts.baselineBody === 'string' ? opts.baselineBody : '';
     if (!baselineBody) {
@@ -695,12 +770,11 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
     for (const payload of allPayloads) {
         if (scanCancelled()) return;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts);
+            const targetStr = req.url;
 
             const start = Date.now();
-            const resp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } });
+            const resp = await fetchSafe(req.url, req.init);
             const duration = Date.now() - start;
             if (!resp) continue;
 
@@ -742,7 +816,7 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
                 const threshold = Math.max(3000, (baselineTime || 1000) + 3000);
                 if (duration > threshold) {
                     const cStart = Date.now();
-                    const confirmResp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } });
+                    const confirmResp = await fetchSafe(req.url, req.init);
                     const confirmDur = Date.now() - cStart;
                     if (confirmResp && confirmDur > threshold) {
                         addVuln(scanId, {
@@ -774,9 +848,8 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
                 ];
                 const falseLengths = [];
                 for (const fp of falsePayloads) {
-                    const falseTarget = new URL(url);
-                    falseTarget.searchParams.set(param, fp);
-                    const falseResp = await fetchSafe(falseTarget.toString(), { headers: { 'User-Agent': UA } });
+                    const falseReq = buildInjectionRequest(url, param, fp, opts);
+                    const falseResp = await fetchSafe(falseReq.url, falseReq.init);
                     if (!falseResp) { falseLengths.push(null); continue; }
                     let falseBody = '';
                     try { falseBody = await falseResp.text(); } catch { }
@@ -813,19 +886,16 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
 }
 
 async function checkXss(scanId, url, extraPayloads = [], opts = {}) {
-    const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : XSS_GUESS;
+    const candidates = resolveParamCandidates(url, opts, XSS_GUESS);
 
     const allPayloads = [...XSS_PAYLOADS, ...extraPayloads];
     for (const payload of allPayloads) {
         if (scanCancelled()) return;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts);
+            const targetStr = req.url;
 
-            const resp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } });
+            const resp = await fetchSafe(req.url, req.init);
             if (!resp) continue;
 
             // Reflected XSS can only execute when the browser renders the
@@ -875,20 +945,21 @@ async function checkXss(scanId, url, extraPayloads = [], opts = {}) {
 
 async function checkOpenRedirect(scanId, url, opts = {}) {
     const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : REDIRECT_GUESS;
+    const candidates = resolveParamCandidates(url, opts, REDIRECT_GUESS);
     const originalDomain = parsedUrl.hostname.replace(/^www\./, '');
 
-    for (const payload of OPEN_REDIRECT_PAYLOADS) {
+    const inject = opts.inject || {};
+    const payloads = [
+        ...OPEN_REDIRECT_PAYLOADS,
+        ...(Array.isArray(inject.extraPayloads) ? inject.extraPayloads : []),
+    ];
+    for (const payload of payloads) {
         if (scanCancelled()) return;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts, { redirect: 'manual' });
+            const targetStr = req.url;
 
-            const resp = await fetchSafe(targetStr, {
-                method: 'GET', redirect: 'manual', headers: { 'User-Agent': UA },
-            });
+            const resp = await fetchSafe(req.url, req.init);
             if (!resp) continue;
 
             const location = resp.headers.get('location');
@@ -1109,9 +1180,7 @@ async function checkRateLimit(scanId, url, opts = {}) {
 // ── OS Command Injection ─────────────────────────────────────────────────────
 
 async function checkCommandInjection(scanId, url, baselineTime, extraPayloads = [], opts = {}) {
-    const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : CMDI_GUESS;
+    const candidates = resolveParamCandidates(url, opts, CMDI_GUESS);
 
     // If the *un-injected* page already contains command-output signatures (a
     // status/health page that prints uid/gid, for example), output-based
@@ -1123,12 +1192,11 @@ async function checkCommandInjection(scanId, url, baselineTime, extraPayloads = 
     for (const payload of payloads) {
         if (scanCancelled()) return;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts);
+            const targetStr = req.url;
 
             const start = Date.now();
-            const resp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } }, 15000);
+            const resp = await fetchSafe(req.url, req.init, 15000);
             const duration = Date.now() - start;
             if (!resp) continue;
 
@@ -1160,7 +1228,7 @@ async function checkCommandInjection(scanId, url, baselineTime, extraPayloads = 
                 const threshold = Math.max(3000, (baselineTime || 1000) + 3000);
                 if (duration > threshold) {
                     const cStart = Date.now();
-                    const confirmResp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } }, 15000);
+                    const confirmResp = await fetchSafe(req.url, req.init, 15000);
                     const confirmDur = Date.now() - cStart;
                     if (confirmResp && confirmDur > threshold) {
                         addVuln(scanId, {
@@ -1186,19 +1254,16 @@ async function checkCommandInjection(scanId, url, baselineTime, extraPayloads = 
 // ── Path Traversal / LFI ─────────────────────────────────────────────────────
 
 async function checkPathTraversal(scanId, url, baseline, extraPayloads = [], opts = {}) {
-    const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : TRAVERSAL_GUESS;
+    const candidates = resolveParamCandidates(url, opts, TRAVERSAL_GUESS);
 
     const payloads = [...TRAVERSAL_PAYLOADS, ...extraPayloads];
     for (const payload of payloads) {
         if (scanCancelled()) return;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts);
+            const targetStr = req.url;
 
-            const resp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } });
+            const resp = await fetchSafe(req.url, req.init);
             if (!resp || resp.status !== 200) continue;
 
             let body = '';
@@ -1228,20 +1293,17 @@ async function checkPathTraversal(scanId, url, baseline, extraPayloads = [], opt
 // ── SSRF ─────────────────────────────────────────────────────────────────────
 
 async function checkSsrf(scanId, url, extraPayloads = [], opts = {}) {
-    const parsedUrl = new URL(url);
-    const params = Array.from(parsedUrl.searchParams.keys());
-    const candidates = params.length > 0 ? params : SSRF_GUESS;
+    const candidates = resolveParamCandidates(url, opts, SSRF_GUESS);
 
     const payloads = [...SSRF_PAYLOADS, ...extraPayloads];
     for (const payload of payloads) {
         if (scanCancelled()) return;
         if (!/^https?:\/\//i.test(payload)) continue;
         for (const param of candidates) {
-            const target = new URL(url);
-            target.searchParams.set(param, payload);
-            const targetStr = target.toString();
+            const req = buildInjectionRequest(url, param, payload, opts);
+            const targetStr = req.url;
 
-            const resp = await fetchSafe(targetStr, { headers: { 'User-Agent': UA } }, 12000);
+            const resp = await fetchSafe(req.url, req.init, 12000);
             if (!resp) continue;
 
             let body = '';
@@ -1770,7 +1832,7 @@ async function checkPromptInjection(scanId, url, opts = {}) {
 async function generateAiPayloads(scanId, url, baseline, reconData) {
     const result = {
         sql_injection: [], xss: [], command_injection: [],
-        path_traversal: [], ssrf: [], prompt_injection: [],
+        path_traversal: [], ssrf: [], open_redirect: [], prompt_injection: [],
     };
     if (!config.llm.enabled) return result;
 
@@ -1808,7 +1870,8 @@ async function generateAiPayloads(scanId, url, baseline, reconData) {
         const gen = await payloadGenerator.generate(ctx, type, {
             exclude: [
                 ...SQL_PAYLOADS, ...XSS_PAYLOADS, ...CMDI_PAYLOADS,
-                ...TRAVERSAL_PAYLOADS, ...SSRF_PAYLOADS, ...PI_PAYLOAD_TEMPLATES,
+                ...TRAVERSAL_PAYLOADS, ...SSRF_PAYLOADS, ...OPEN_REDIRECT_PAYLOADS,
+                ...PI_PAYLOAD_TEMPLATES,
             ].map(p => p.toLowerCase()),
         });
         result[type] = gen.payloads.map((p) => p.payload);
@@ -1895,9 +1958,35 @@ async function runDeterministic(scanId, url, options, completed) {
     // content type, discovered parameters and form fields, a verdict on
     // whether the page is dynamic at all, plus (when enabled) same-origin API
     // endpoint candidates mined from the page and its JS bundles.
-    const reconData = await recon.runRecon(url, fetchSafe, { discover: true });
+    const scanDiscovery = config.scanDiscovery || {};
+    const reconData = await recon.runRecon(url, fetchSafe, {
+        discover: true,
+        maxDepth: scanDiscovery.maxDepth,
+        maxVisited: scanDiscovery.maxVisited,
+        probeCommon: scanDiscovery.probeCommon,
+        commonPaths: scanDiscovery.commonPaths,
+        maxScripts: scanDiscovery.maxScripts,
+        maxProbesPerEndpoint: scanDiscovery.maxProbesPerEndpoint,
+    });
     if (!reconData.reachable) {
         throw new Error(`Target unreachable: ${url}`);
+    }
+    // Persist a compact recon snapshot so reports can render the discovered
+    // endpoints section (bounded so the row stays small).
+    try {
+        if (stmts.saveRecon && typeof stmts.saveRecon.run === 'function') {
+            stmts.saveRecon.run({
+                id: scanId,
+                recon_json: JSON.stringify({
+                    endpoints: (reconData.endpoints || []).slice(0, 60),
+                    links: (reconData.links || []).slice(0, 80).map((l) => ({ url: l.url, path: l.path, params: l.params })),
+                    forms: (reconData.forms || []).slice(0, 40),
+                    params: (reconData.params || []).slice(0, 60),
+                }),
+            });
+        }
+    } catch (err) {
+        addEvent(scanId, 'initialization', 'info', 'Recon Snapshot Skipped', String(err.message || err), { severity: 'info' });
     }
     options = { ...options, recon: reconData, baselineBody: reconData.body };
 
@@ -2015,6 +2104,34 @@ async function runDeterministic(scanId, url, options, completed) {
 
     await Promise.all([httpPromise, filePromise, ratePromise]);
 
+    // Phase 5: type-appropriate fuzzing of every discovered input surface
+    // (parameterised links, forms, API paths). Placed last on purpose so it can
+    // only consume leftover request budget — the checks above behave exactly as
+    // before. Each surface is matched to the vulnerability classes it can
+    // actually carry (see surfaces.classifySurface) and tested with both the
+    // fixed payload sets and the AI-written payloads.
+    if (options.checkSurfaces !== false && config.scanner.scanDiscovery.fuzzSurfaces) {
+        const surfaceDetectors = {
+            sql_injection: (u, payloads, o) => checkSqlInjection(scanId, u, baselineTime, payloads, o),
+            xss: (u, payloads, o) => checkXss(scanId, u, payloads, o),
+            open_redirect: (u, payloads, o) => checkOpenRedirect(scanId, u, withOpenRedirectPayloads(o, payloads)),
+            command_injection: (u, payloads, o) => checkCommandInjection(scanId, u, baselineTime, payloads, o),
+            path_traversal: (u, payloads, o) => checkPathTraversal(scanId, u, baseline, payloads, o),
+            ssrf: (u, payloads, o) => checkSsrf(scanId, u, payloads, o),
+        };
+        const surfaceSummary = await surfaces.runSurfaceFuzzing({
+            scanId, url, baselineTime, reconData, ai,
+            deps: {
+                fetchSafe, addEvent, simpleHash, isSoft404, config,
+                scanCancelled, scanBudgetExhausted, detectors: surfaceDetectors, UA,
+            },
+        });
+        if (surfaceSummary && surfaceSummary.tested > 0) {
+            completed.push('surface_fuzz');
+            updateProgress(scanId, 90, 'finalization', completed);
+        }
+    }
+
     if (scanBudgetExhausted()) {
         addEvent(scanId, 'finalization', 'warning', 'Request Budget Exhausted',
             'The deterministic scan hit its request/time cap; remaining checks were skipped.', { severity: 'info' });
@@ -2127,6 +2244,8 @@ async function runScan(scanId, url, options = {}) {
         cancelled: false,
     };
 
+    recordedFindings.set(scanId, new Set());
+
     try {
         await scanCtx.run(ctx, async () => {
             stmts.updateScanRunning.run(scanId);
@@ -2174,6 +2293,7 @@ async function runScan(scanId, url, options = {}) {
         stmts.failScan.run(scanId);
         addEvent(scanId, 'finalization', 'error', 'Scan Failed', String(err), { severity: 'info' });
     } finally {
+        recordedFindings.delete(scanId);
         cancelledScans.delete(scanId);
     }
 }
@@ -2184,6 +2304,7 @@ module.exports = {
     finalizeScan,
     cancelScan,
     payloadEngine,
+    SCAN_STAGES,
     simpleHash,
     extractFingerprint,
     isSoft404,

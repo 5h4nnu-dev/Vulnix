@@ -139,6 +139,29 @@ describe('GET /api/stats/summary', () => {
     });
 });
 
+describe('GET /api/scans/:id/status', () => {
+    it('reports a stages_total derived from the runner stages', async () => {
+        const { stmts } = require('../database');
+        const { SCAN_STAGES } = require('../scanner');
+        stmts.getScan.get.mockReturnValue({
+            id: 'test-status',
+            url: 'https://example.com',
+            status: 'running',
+            progress: 50,
+            current_stage: 'xss',
+            stages_completed: JSON.stringify(['initialization', 'surface_fuzz']),
+        });
+
+        const res = await request(app)
+            .get('/api/scans/test-status/status')
+            .expect(200);
+
+        expect(res.body.stages_total).toBe(SCAN_STAGES.length);
+        expect(res.body.stages_completed).toEqual(['initialization', 'surface_fuzz']);
+        expect(SCAN_STAGES).toContain('surface_fuzz');
+    });
+});
+
 describe('DELETE /api/scans/:id', () => {
     it('returns 204 on delete', async () => {
         await request(app)

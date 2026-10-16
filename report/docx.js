@@ -112,6 +112,9 @@ async function generate(scan, vulns, events, extras = {}) {
             txt(`${i + 1}. ${v.title}`, { bold: true, size: 24, color: SEV_COLOR[v.severity] || '000000' }),
             { heading: HeadingLevel.HEADING_2 }
         ));
+        if (v.affected_endpoint) {
+            children.push(para(txt(`Affected Endpoint: ${v.affected_endpoint}`, { bold: true, color: 'C00000' })));
+        }
         const rows = [
             ['Severity', String(v.severity).toUpperCase()],
             ['Type', v.type],
@@ -163,6 +166,22 @@ async function generate(scan, vulns, events, extras = {}) {
         children.push(simpleTable(
             ['Endpoint', 'Technique', 'Detected'],
             promptInjection.map((t) => [String(t.endpoint).slice(0, 70), t.technique, t.detected ? 'YES' : 'no'])
+        ));
+    }
+
+    const endpointsList = (extras.reconData && Array.isArray(extras.reconData.endpoints)) ? extras.reconData.endpoints
+        : (Array.isArray(extras.discoveredEndpoints) ? extras.discoveredEndpoints : []);
+    if (endpointsList.length > 0) {
+        children.push(para(txt('Discovered Endpoints', { bold: true, size: 28 }), { heading: HeadingLevel.HEADING_1 }));
+        children.push(simpleTable(
+            ['Path', 'Method', 'Kind', 'Params'],
+            endpointsList.map((ep) => {
+                const path = ep.path || ep.endpoint || ep.url || '';
+                const method = ep.method || 'GET';
+                const kind = ep.kind || ep.source || 'static';
+                const params = Array.isArray(ep.params) ? ep.params.join(', ') : (ep.params || '');
+                return [String(path), String(method).toUpperCase(), String(kind), String(params).slice(0, 120)];
+            })
         ));
     }
 

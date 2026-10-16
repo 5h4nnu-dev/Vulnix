@@ -55,6 +55,7 @@ function generate(scan, vulns, events, extras = {}) {
         for (let i = 0; i < vulnerabilities.length; i++) {
             const v = vulnerabilities[i];
             md += `### ${i + 1}. ${SEV_EMOJI[v.severity] || '⚪'} ${v.title}\n\n`;
+            if (v.affected_endpoint) md += `> 🎯 **Affected Endpoint:** \`${v.affected_endpoint}\`\n\n`;
             md += `| Field | Details |\n|-------|--------|\n`;
             md += `| **Severity** | ${String(v.severity).toUpperCase()} |\n`;
             md += `| **Type** | ${v.type} |\n`;
@@ -94,6 +95,28 @@ function generate(scan, vulns, events, extras = {}) {
         md += `| Endpoint | Technique | Detected |\n|----------|-----------|----------|\n`;
         for (const t of promptInjection) {
             md += `| \`${String(t.endpoint).slice(0, 80)}\` | ${t.technique} | ${t.detected ? '✅' : '—'} |\n`;
+        }
+        md += `\n`;
+    }
+
+    // Discovered Endpoints section
+    const discovered = (extras.reconData && (extras.reconData.endpoints || extras.reconData.links || extras.reconData.forms)) || [];
+    let endpointsList = null;
+    if (extras.reconData && Array.isArray(extras.reconData.endpoints)) {
+        endpointsList = extras.reconData.endpoints;
+    }
+    if ((!endpointsList || endpointsList.length === 0) && Array.isArray(extras.discoveredEndpoints)) {
+        endpointsList = extras.discoveredEndpoints;
+    }
+    if (endpointsList && endpointsList.length > 0) {
+        md += `## 🔍 Discovered Endpoints (${endpointsList.length})\n\n`;
+        md += `| Path | Method | Kind | Params |\n|------|--------|------|--------|\n`;
+        for (const ep of endpointsList) {
+            const path = ep.path || ep.endpoint || ep.url || '';
+            const method = ep.method || (ep.params && ep.params.length ? 'GET' : 'GET');
+            const kind = ep.kind || ep.source || (Array.isArray(ep.params) && ep.params.length ? 'param' : 'static');
+            const params = Array.isArray(ep.params) ? ep.params.join(', ') : (ep.params || '');
+            md += `| \`${path}\` | ${String(method).toUpperCase()} | ${kind} | ${params} |\n`;
         }
         md += `\n`;
     }

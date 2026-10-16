@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const { v4: uuid } = require('uuid');
 const { stmts } = require('./database');
-const { runScan, payloadEngine, cancelScan, probePromptInjectionEndpoint } = require('./scanner');
+const { runScan, payloadEngine, cancelScan, probePromptInjectionEndpoint, SCAN_STAGES } = require('./scanner');
 const config = require('./config');
 const llmClient = require('./llm/client');
 const payloadGenerator = require('./llm/payloadGenerator');
@@ -130,7 +130,7 @@ app.get('/api/scans/:id/status', (req, res) => {
         // Stages reference the deterministic runner's stage names. A static
         // page legitimately completes fewer of them (injection stages are
         // skipped), so this is an upper bound, not an exact count.
-        stages_total: 16,
+        stages_total: SCAN_STAGES.length,
     });
 });
 
@@ -165,10 +165,22 @@ function loadReportExtras(scanId) {
     const safe = (fn, fallback = []) => {
         try { return typeof fn === 'function' ? fn() : fallback; } catch { return fallback; }
     };
+    let reconData = {};
+    try {
+        // `getRecon` is a prepared statement (older DBs / mocked stmts may not
+        // have it) returning { recon_json }.
+        const row = stmts.getRecon ? stmts.getRecon.get(scanId) : null;
+        const raw = row ? (row.recon_json ?? row.recon ?? null) : null;
+        if (typeof raw === 'string' && raw) reconData = JSON.parse(raw);
+        else if (raw && typeof raw === 'object') reconData = raw;
+    } catch { reconData = {}; }
+    if (!reconData || typeof reconData !== 'object') reconData = {};
     return {
         promptInjection: safe(() => stmts.getPiTests.all(scanId)),
         agentSteps: safe(() => stmts.getAgentSteps.all(scanId)),
         aiPayloads: safe(() => stmts.getAiPayloads.all(scanId)),
+        reconData,
+        discoveredEndpoints: Array.isArray(reconData.endpoints) ? reconData.endpoints : [],
     };
 }
 

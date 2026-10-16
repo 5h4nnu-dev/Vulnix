@@ -91,13 +91,15 @@ Each scan follows this pipeline:
 11. **OS Command Injection** — Command-output signatures (`uid=`, passwd) and time-based sleep detection
 12. **Path Traversal / LFI** — File-content signatures with soft-404 elimination
 13. **SSRF** — Cloud metadata / internal-response markers after URL injection
-14. **Prompt Injection (target-side)** — Canary instruction-override, prompt-leak, and role-confusion probes over query params and JSON POST bodies (AI-written probes when enabled)
-15. **HTTP Method Analysis** — Test all HTTP methods with TRACE echo verification
-16. **Sensitive File Discovery** — Content-signature validated file/directory probing
-17. **Rate Limit Testing** — 20 rapid requests with success rate verification
-18. **Autonomous Agent** *(hybrid/agent mode)* — bounded plan → act → observe loop
-19. **Risk Scoring** — Weighted score with diminishing returns per vulnerability type
-20. **AI Enrichment** *(when enabled)* — findings analyzed, executive summary generated
+14. **Discovered API Endpoint Probing** — same-origin API paths mined from the page and JS bundles (error-based SQLi, reflection, POST auth-bypass)
+15. **Prompt Injection (target-side)** — Canary instruction-override, prompt-leak, and role-confusion probes over query params and JSON POST bodies (AI-written probes when enabled)
+16. **HTTP Method Analysis** — Test all HTTP methods with TRACE echo verification
+17. **Sensitive File Discovery** — Content-signature validated file/directory probing
+18. **Rate Limit Testing** — 20 rapid requests with success rate verification
+19. **Discovered-Surface Fuzzing** — every parameterised link and form found with cheerio is tested only with the vulnerability classes its parameters can carry (GET query or POST body), using fixed + AI payloads
+20. **Autonomous Agent** *(hybrid/agent mode)* — bounded plan → act → observe loop
+21. **Risk Scoring** — Weighted score with diminishing returns per vulnerability type
+22. **AI Enrichment** *(when enabled)* — findings analyzed, executive summary generated
 
 ---
 
@@ -296,6 +298,25 @@ models deprioritized. Set `LLM_MODEL` to pin an exact model and skip discovery.
 > **No mocked output.** Production code only ever returns parsed responses from
 > the configured provider. Test doubles (`jest.mock`, a stubbed `global.fetch`)
 > exist only under `tests/` and never touch the running tool.
+
+### Scanner configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SCAN_MAX_REQUESTS` | `400` | Cap on requests a single deterministic scan may issue |
+| `SCAN_MAX_SECONDS` | `120` | Wall-clock cap (enforced per request) |
+| `SCAN_SKIP_STATIC_INJECTION` | `true` | Skip the injection battery on pages with no dynamic surface |
+| `SCAN_RATE_LIMIT_SAMPLES` | `4` | Spaced probes used by the rate-limit check |
+| `SCAN_DISCOVERY_SCRIPTS` | `3` | JS bundles mined for API paths |
+| `SCAN_DISCOVERY_ENDPOINTS` | `8` | Top candidate API endpoints actually probed |
+| `SCAN_DISCOVERY_PROBES` | `4` | Probe requests allowed per API endpoint |
+| `SCAN_DISCOVERY_POST` | `true` | Allow the POST auth-bypass probe on login endpoints |
+| `SCAN_FUZZ_SURFACES` | `true` | Fuzz every discovered input surface with type-appropriate fixed + AI payloads |
+| `SCAN_DISCOVERY_SURFACES` | `12` | Max discovered surfaces fuzzed per scan |
+| `SCAN_DISCOVERY_DEPTH` | `1` | Recursive crawl depth (`1` = target page only; `N` adds `N-1` link hops) |
+| `SCAN_DISCOVERY_VISITED` | `30` | Max pages visited during recursive crawl |
+| `SCAN_DISCOVERY_PROBE_COMMON` | `false` | Probe common paths (e.g. /login, /api) if not linked |
+| `SCAN_DISCOVERY_COMMON_PATHS` | `/login,/signin,...` | Comma-separated paths to probe when enabled |
 
 ---
 

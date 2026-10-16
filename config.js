@@ -114,6 +114,15 @@ const config = {
             maxEndpoints: toInt(process.env.SCAN_DISCOVERY_ENDPOINTS, 8),
             maxProbesPerEndpoint: toInt(process.env.SCAN_DISCOVERY_PROBES, 4),
             postProbe: toBool(process.env.SCAN_DISCOVERY_POST, true),
+            maxDepth: toInt(process.env.SCAN_DISCOVERY_DEPTH, 1),
+            maxVisited: toInt(process.env.SCAN_DISCOVERY_VISITED, 30),
+            probeCommon: toBool(process.env.SCAN_DISCOVERY_PROBE_COMMON, false),
+            commonPaths: (process.env.SCAN_DISCOVERY_COMMON_PATHS || '/login,/signin,/register,/logout,/admin,/api,/api/v1,/api/v2,/api/users,/api/auth').split(',').map(p => p.trim()).filter(Boolean),
+            // Type-appropriate fuzzing of every discovered input surface
+            // (parameterised links, forms, API paths) with the fixed + AI
+            // payload sets. Runs last so it consumes leftover budget only.
+            fuzzSurfaces: toBool(process.env.SCAN_FUZZ_SURFACES, true),
+            maxSurfaces: toInt(process.env.SCAN_DISCOVERY_SURFACES, 12),
         },
     },
 

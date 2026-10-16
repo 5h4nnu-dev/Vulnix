@@ -128,6 +128,8 @@ addColumnIfMissing('scans', 'llm_model', 'TEXT');
 addColumnIfMissing('scans', 'prompt_injection_count', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('scans', 'executive_summary', 'TEXT');
 addColumnIfMissing('scans', 'hardening_count', 'INTEGER NOT NULL DEFAULT 0');
+// Recon snapshot (discovered endpoints/links/forms) surfaced in reports.
+addColumnIfMissing('scans', 'recon_json', 'TEXT');
 
 addColumnIfMissing('vulnerabilities', 'source', "TEXT NOT NULL DEFAULT 'static'");
 addColumnIfMissing('vulnerabilities', 'confidence', 'REAL');
@@ -143,6 +145,12 @@ const stmts = {
   `),
 
   getScan: db.prepare(`SELECT * FROM scans WHERE id = ?`),
+
+  saveRecon: db.prepare(`
+    UPDATE scans SET recon_json = @recon_json WHERE id = @id
+  `),
+
+  getRecon: db.prepare(`SELECT recon_json FROM scans WHERE id = ?`),
 
   listScans: db.prepare(`
     SELECT * FROM scans ORDER BY created_at DESC LIMIT ? OFFSET ?

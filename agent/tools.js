@@ -9,6 +9,7 @@
 
 const UA = 'Vulnix-Agent/1.0';
 const payloadGenerator = require('../llm/payloadGenerator');
+const { parseHtml } = require('../surfaces');
 const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('../xss-guards');
 
 // ── Small self-contained helpers (avoid coupling to scanner.js) ───────────────
@@ -335,19 +336,18 @@ async function execute(name, args, state) {
             if (!resp) return { ok: false, error: 'crawl failed' };
             const body = await readBody(resp);
             const origin = new URL(state.targetUrl).origin;
+            // Reuse the deterministic scanner's cheerio parser so both engines
+            // see the same surfaces (same-origin, non-asset links + form fields).
+            const parsed = parseHtml(body, base);
             const links = new Set();
             const params = new Set();
-            for (const m of body.matchAll(/(?:href|src|action)\s*=\s*["']([^"'#]+)["']/gi)) {
-                try {
-                    const abs = new URL(m[1], base);
-                    if (abs.origin === origin) {
-                        links.add(abs.toString());
-                        abs.searchParams.forEach((_, k) => params.add(k));
-                    }
-                } catch { /* ignore */ }
+            for (const l of parsed.links) {
+                if (l.url.startsWith(origin)) links.add(l.url);
+                for (const p of l.params) params.add(p);
             }
-            for (const m of body.matchAll(/<form[^>]*>/gi)) {
-                for (const im of m[0].matchAll(/name\s*=\s*["']([^"']+)["']/gi)) params.add(im[1]);
+            for (const f of parsed.forms) {
+                if (f.url.startsWith(origin)) links.add(f.url);
+                for (const p of f.params) params.add(p);
             }
             state.memory.addDiscovered(links);
             return {

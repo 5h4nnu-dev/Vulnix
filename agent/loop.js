@@ -71,7 +71,15 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
 
     let reconData = null;
     try {
-        reconData = await recon.runRecon(url, tools.fetchSafe ? tools.fetchSafe : require('./tools').fetchSafe, { discover: true });
+        reconData = await recon.runRecon(url, tools.fetchSafe ? tools.fetchSafe : require('./tools').fetchSafe, {
+            discover: true,
+            maxDepth: config.scanDiscovery.maxDepth,
+            maxVisited: config.scanDiscovery.maxVisited,
+            probeCommon: config.scanDiscovery.probeCommon,
+            commonPaths: config.scanDiscovery.commonPaths,
+            maxScripts: config.scanDiscovery.maxScripts,
+            maxProbesPerEndpoint: config.scanDiscovery.maxProbesPerEndpoint,
+        });
         emit('agent', 'info', 'Agent Recon', `Discovered ${reconData.endpoints ? reconData.endpoints.length : 0} endpoints, ${reconData.parameters ? reconData.parameters.length : 0} unique params`, {});
     } catch (err) {
         emit('agent', 'warning', 'Recon Failed', String(err.message || err), {});
