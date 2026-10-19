@@ -112,9 +112,6 @@ async function generate(scan, vulns, events, extras = {}) {
             txt(`${i + 1}. ${v.title}`, { bold: true, size: 24, color: SEV_COLOR[v.severity] || '000000' }),
             { heading: HeadingLevel.HEADING_2 }
         ));
-        if (v.affected_endpoint) {
-            children.push(para(txt(`Affected Endpoint: ${v.affected_endpoint}`, { bold: true, color: 'C00000' })));
-        }
         const rows = [
             ['Severity', String(v.severity).toUpperCase()],
             ['Type', v.type],
@@ -122,7 +119,6 @@ async function generate(scan, vulns, events, extras = {}) {
             ['Source', v.source || 'static'],
         ];
         if (v.confidence != null) rows.push(['Confidence', `${Math.round(v.confidence * 100)}%`]);
-        rows.push(['Affected Endpoint', v.affected_endpoint]);
         children.push(simpleTable(['Field', 'Details'], rows));
 
         if (v.payload) {
@@ -146,6 +142,9 @@ async function generate(scan, vulns, events, extras = {}) {
         if (v.exploitation) {
             children.push(para(txt('Possible Exploit:', { bold: true })));
             children.push(para(txt(v.exploitation)));
+        }
+        if (v.affected_endpoint) {
+            children.push(para(txt(`Affected Endpoint: ${v.affected_endpoint}`, { bold: true, color: 'C00000' })));
         }
         children.push(para(txt('Remediation:', { bold: true })));
         children.push(para(txt(v.remediation)));

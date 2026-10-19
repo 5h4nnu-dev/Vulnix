@@ -529,6 +529,12 @@ function renderVulnCard(v, index) {
             <div class="vuln-section-content">${escapeHtml(v.exploitation)}</div>
           </div>
         ` : ''}
+        ${v.affected_endpoint ? `
+          <div class="vuln-section">
+            <div class="vuln-section-title">Affected Endpoint</div>
+            <div class="vuln-section-content">${escapeHtml(v.affected_endpoint)}</div>
+          </div>
+        ` : ''}
         <div class="vuln-section">
           <div class="vuln-section-title">Remediation</div>
           <div class="vuln-remediation">${escapeHtml(v.remediation)}</div>

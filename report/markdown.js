@@ -55,7 +55,6 @@ function generate(scan, vulns, events, extras = {}) {
         for (let i = 0; i < vulnerabilities.length; i++) {
             const v = vulnerabilities[i];
             md += `### ${i + 1}. ${SEV_EMOJI[v.severity] || '⚪'} ${v.title}\n\n`;
-            if (v.affected_endpoint) md += `> 🎯 **Affected Endpoint:** \`${v.affected_endpoint}\`\n\n`;
             md += `| Field | Details |\n|-------|--------|\n`;
             md += `| **Severity** | ${String(v.severity).toUpperCase()} |\n`;
             md += `| **Type** | ${v.type} |\n`;
@@ -70,6 +69,7 @@ function generate(scan, vulns, events, extras = {}) {
             if (v.evidence) md += `**Evidence:**\n\`\`\`\n${v.evidence}\n\`\`\`\n\n`;
             if (v.ai_explanation) md += `**Detailed Analysis:**\n${v.ai_explanation}\n\n`;
             if (v.exploitation) md += `**Possible Exploit:**\n${v.exploitation}\n\n`;
+            if (v.affected_endpoint) md += `> 🎯 **Affected Endpoint:** \`${v.affected_endpoint}\`\n\n`;
             md += `**Remediation:**\n${v.remediation}\n\n`;
             md += `---\n\n`;
         }
