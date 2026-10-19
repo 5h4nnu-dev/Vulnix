@@ -139,8 +139,12 @@ async function runRecon(url, fetchFn = global.fetch, opts = {}) {
     try { params = Array.from(new URL(url).searchParams.keys()); } catch { /* ignore */ }
 
     const formParams = extractFormParams(body);
-    const hasMarkup = /<(form|input|select|textarea)|action\s*=\s*["']|<script/i.test(body);
-    const dynamic = params.length > 0 || formParams.length > 0 || hasMarkup;
+    // A script tag alone does not make an otherwise static document an input
+    // surface. Conversely JSON/API responses can be dynamic without HTML.
+    const hasInputMarkup = /<(?:form|input|select|textarea)\b|\bonclick\s*=|\bonchange\s*=/i.test(body);
+    const looksLikeApi = /(?:^|\/)(?:api|graphql|rest|rpc)(?:\/|$)/i.test(new URL(url).pathname);
+    const isJson = /(?:application\/json|\+json)/i.test(contentType);
+    const dynamic = params.length > 0 || formParams.length > 0 || hasInputMarkup || isJson || looksLikeApi;
 
     const result = {
         reachable: true,
@@ -391,7 +395,9 @@ async function crawlEndpoints(baseUrl, startBody, fetchFn = global.fetch, opts =
     let scripts = 0;
     while (queue.length > 0 && visited.size <= maxVisited) {
         const item = queue.shift();
-        if (!item || item.depth >= maxDepth) continue;
+        // `maxDepth: 1` means fetch pages linked directly from the root. The
+        // former >= check skipped every queued page at the default depth.
+        if (!item || item.depth > maxDepth) continue;
         try {
             const resp = await fetchFn(item.url, { method: 'GET', headers: { 'User-Agent': UA } }, 10000);
             if (!resp) continue;

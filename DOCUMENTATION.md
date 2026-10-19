@@ -82,7 +82,7 @@ Each scan follows this pipeline:
 2. **Baseline Fingerprinting** — Fetch a random nonexistent path to fingerprint soft-404s
 3. **Response Time Baseline** — Measure median response time for time-based detection calibration
 4. **Technology Fingerprinting** — Identify frameworks and server software
-5. **AI Payload Generation** *(hybrid/agent mode)* — model writes endpoint-specific payloads
+5. **AI Payload Generation** *(hybrid mode)* — model writes endpoint-specific payloads
 6. **Security Headers Analysis** — Check 7+ security headers + cookie security flags
 7. **CORS Analysis** — Test with malicious origins for reflection or wildcard policies
 8. **SQL Injection** — Error-based, time-based (with baseline), and boolean-blind detection
@@ -95,11 +95,19 @@ Each scan follows this pipeline:
 15. **Prompt Injection (target-side)** — Canary instruction-override, prompt-leak, and role-confusion probes over query params and JSON POST bodies (AI-written probes when enabled)
 16. **HTTP Method Analysis** — Test all HTTP methods with TRACE echo verification
 17. **Sensitive File Discovery** — Content-signature validated file/directory probing
-18. **Rate Limit Testing** — 20 rapid requests with success rate verification
-19. **Discovered-Surface Fuzzing** — every parameterised link and form found with cheerio is tested only with the vulnerability classes its parameters can carry (GET query or POST body), using fixed + AI payloads
-20. **Autonomous Agent** *(hybrid/agent mode)* — bounded plan → act → observe loop
+18. **Rate Limit Testing** — bounded spaced requests with success-rate checks
+19. **Discovered-Surface Fuzzing** — prioritized parameterized links and forms are tested up to the configured surface limit, using the vulnerability classes their inputs can carry
+20. **Autonomous Agent** *(hybrid/agent mode)* — the deterministic checks run first, then a bounded plan → act → observe loop adds adaptive probes
 21. **Risk Scoring** — Weighted score with diminishing returns per vulnerability type
 22. **AI Enrichment** *(when enabled)* — findings analyzed, executive summary generated
+
+Every scan mode runs the deterministic checks. `agent` then adds model-directed
+probes; `hybrid` additionally uses AI-generated payloads in the deterministic
+surface battery. Scan events include discovery counts, disabled checks, actual
+request counts, failed requests, and budget exhaustion. Discovery and surface
+fuzzing are bounded, so a clean result means no issue was detected in the
+completed coverage. Blind SSRF requiring an out-of-band callback service is not
+currently detected.
 
 ---
 
@@ -313,7 +321,7 @@ models deprioritized. Set `LLM_MODEL` to pin an exact model and skip discovery.
 | `SCAN_DISCOVERY_POST` | `true` | Allow the POST auth-bypass probe on login endpoints |
 | `SCAN_FUZZ_SURFACES` | `true` | Fuzz every discovered input surface with type-appropriate fixed + AI payloads |
 | `SCAN_DISCOVERY_SURFACES` | `12` | Max discovered surfaces fuzzed per scan |
-| `SCAN_DISCOVERY_DEPTH` | `1` | Recursive crawl depth (`1` = target page only; `N` adds `N-1` link hops) |
+| `SCAN_DISCOVERY_DEPTH` | `1` | Same-origin link depth (`1` fetches pages linked directly from the target; `N` follows N link hops) |
 | `SCAN_DISCOVERY_VISITED` | `30` | Max pages visited during recursive crawl |
 | `SCAN_DISCOVERY_PROBE_COMMON` | `false` | Probe common paths (e.g. /login, /api) if not linked |
 | `SCAN_DISCOVERY_COMMON_PATHS` | `/login,/signin,...` | Comma-separated paths to probe when enabled |

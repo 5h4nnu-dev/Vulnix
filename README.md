@@ -132,8 +132,15 @@ configuration variables below for every AI-related setting.
 | Mode | What it does |
 |------|--------------|
 | `deterministic` | Fast, reproducible checks. No LLM required. |
-| `hybrid` | Deterministic recon first, then an autonomous AI agent adds deeper testing. |
-| `agent` | Fully autonomous plan → act → observe loop driven by the model. |
+| `hybrid` | Deterministic checks with AI-generated payloads, followed by adaptive agent probes. |
+| `agent` | The fixed deterministic checks run first, followed by an adaptive plan → act → observe agent. |
+
+All modes retain the deterministic checks as a baseline. Agent budgets count
+scanner-issued requests, including retries and confirmation probes. Scan
+events report disabled checks, discovery coverage, request failures, and budget
+exhaustion. A clean result only means no issue was detected in the surfaces and
+checks that completed; discovery is bounded, and blind SSRF without a callback
+service is outside the current detector's coverage.
 
 AI/autonomous modes require the **"I am authorized"** confirmation in the UI (and
 `authorized: true` in the API) and `LLM_ENABLED=true`.

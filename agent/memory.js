@@ -15,6 +15,7 @@ class AgentMemory {
 
         this.startedAt = Date.now();
         this.requestCount = 0;
+        this.requestFailures = 0;
         this.steps = [];
         this.findings = [];
         this.visited = new Set();
@@ -68,6 +69,7 @@ class AgentMemory {
             target: this.targetUrl,
             steps: this.steps.length,
             requests: this.requestCount,
+            requestFailures: this.requestFailures,
             findings: this.findings.length,
             elapsed: Math.round(this.elapsedSeconds()),
         };

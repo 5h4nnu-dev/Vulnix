@@ -16,9 +16,13 @@ const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isR
 const SQL_BASIC = payloadEngine.getPayloadsByType('sql_injection', 'basic').map(p => p.payload);
 const SQL_TIME = payloadEngine.getPayloadsByType('sql_injection', 'time_based').map(p => p.payload);
 const SQL_ADVANCED = payloadEngine.getPayloadsByType('sql_injection', 'advanced')?.slice(0, 3).map(p => p.payload) || [];
-const SQL_PAYLOADS = [...SQL_BASIC, ...SQL_TIME, ...SQL_ADVANCED];
+// Numeric predicates are tried first because common keys such as `id` are
+// often interpolated as numbers; quote-prefixed probes can only produce a
+// parser error and miss boolean-blind SQLi on those surfaces.
+const SQL_PAYLOADS = ['0 OR 1=1--', '0 AND 1=1--', ...SQL_BASIC, ...SQL_TIME, ...SQL_ADVANCED];
 
 const XSS_PAYLOADS = [
+    '1--><ScRiPt >alert(1)</ScRiPt><!--',
     ...payloadEngine.getPayloadsByType('xss', 'basic').map(p => p.payload),
     ...(payloadEngine.getPayloadsByType('xss', 'filter_bypass')?.slice(0, 4).map(p => p.payload) || []),
 ];
@@ -198,6 +202,7 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
         return resp;
     } catch {
         clearTimeout(timer);
+        if (ctx) ctx.requestFailures = (ctx.requestFailures || 0) + 1;
         return null;
     }
 }
@@ -248,7 +253,7 @@ function buildInjectionRequest(url, param, payload, opts = {}, extraInit = {}) {
             url,
             init: {
                 method: 'POST',
-                headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded', ...(inject.headers || {}) },
                 body: new URLSearchParams(fields).toString(),
                 ...extraInit,
             },
@@ -836,7 +841,7 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
                 }
             }
 
-            if ((payload.includes('AND 1=1') || payload.includes("OR '1'='1")) && baselineBody.length > 0) {
+            if ((/\b(?:AND|OR)\s+1=1\b/i.test(payload) || payload.includes("OR '1'='1")) && baselineBody.length > 0) {
                 // Boolean-blind confirmation now requires TWO independently
                 // rated FALSE variants (1=2 and 1=3) that both diverge from the
                 // baseline. A single coincidental length change — or a page
@@ -857,21 +862,19 @@ async function checkSqlInjection(scanId, url, baselineTime, extraPayloads = [], 
                 }
 
                 const trueLen = body.length;
-                const baseLen = baselineBody.length;
-                const maxLen = Math.max(baseLen, 1);
+                const [falseA, falseB] = falseLengths;
+                const scale = Math.max(trueLen, falseA || 0, falseB || 0, 1);
+                const falseControlsAgree = falseA != null && falseB != null && Math.abs(falseA - falseB) / scale < 0.15;
+                const trueFalseDivergence = falseA != null && falseB != null &&
+                    Math.abs(trueLen - falseA) / scale > 0.25 && Math.abs(trueLen - falseB) / scale > 0.25;
 
-                const trueMatchesBase = Math.abs(trueLen - baseLen) / maxLen < 0.15;
-                const divergentFalseCount = falseLengths.filter(
-                    (l) => l != null && Math.abs(l - baseLen) / maxLen > 0.25
-                ).length;
-
-                if (trueMatchesBase && divergentFalseCount >= 2) {
+                if (falseControlsAgree && trueFalseDivergence) {
                     addVuln(scanId, {
                         type: 'sql_injection', severity: 'high',
                         title: 'Boolean-Based Blind SQL Injection',
-                        description: `"${param}" differs: TRUE=${trueLen}B, FALSE=${falseLengths.join('/')}B, baseline=${baseLen}B.`,
+                        description: `"${param}" differs: TRUE=${trueLen}B, FALSE=${falseLengths.join('/')}B.`,
                         affectedEndpoint: targetStr, payload,
-                        evidence: `TRUE: ${trueLen}B, FALSE: ${falseLengths.join('/')}B, Baseline: ${baseLen}B`,
+                        evidence: `TRUE: ${trueLen}B, FALSE controls: ${falseLengths.join('/')}B (controls agree and differ from TRUE)`,
                         aiExplanation: "Boolean-based blind SQL injection confirmed via TRUE vs FALSE response differences.",
                         exploitation: "Attackers extract data bit-by-bit via conditional SQL statements.",
                         remediation: 'Use parameterized queries/prepared statements.',
@@ -916,7 +919,7 @@ async function checkXss(scanId, url, extraPayloads = [], opts = {}) {
             // not inside an HTML comment, not inside a quoted attribute it
             // cannot break out of, and the payload itself must be an
             // executable HTML token.
-            if (isInsideHtmlComment(body, idx)) continue;
+            if (isInsideHtmlComment(body, idx, payload)) continue;
             if (isInsideQuotedAttribute(body, idx, payload)) continue;
             if (!hasExecutableXssToken(payload)) continue;
 
@@ -1501,7 +1504,7 @@ async function probeApiEndpoint(scanId, endpointUrl, baseResp, baseBody, ep, opt
                             let xBody = '';
                             try { xBody = await xResp.text(); } catch { /* ignore */ }
                             const xIdx = xBody.indexOf(xssPayload);
-                            if (xIdx !== -1 && !isInsideHtmlComment(xBody, xIdx) && !isInsideQuotedAttribute(xBody, xIdx, xssPayload)) {
+                            if (xIdx !== -1 && !isInsideHtmlComment(xBody, xIdx, xssPayload) && !isInsideQuotedAttribute(xBody, xIdx, xssPayload)) {
                                 addVuln(scanId, {
                                     type: 'xss', severity: 'high',
                                     title: 'Reflected XSS in API Endpoint',
@@ -1943,6 +1946,18 @@ function cancelScan(scanId) {
 }
 
 async function runDeterministic(scanId, url, options, completed) {
+    const disabledChecks = [
+        ['headers', options.checkHeaders], ['CORS', options.checkCors],
+        ['SQL injection', options.checkSqlInjection], ['XSS', options.checkXss],
+        ['open redirect', options.checkOpenRedirect], ['command injection', options.checkCommandInjection],
+        ['path traversal', options.checkPathTraversal], ['SSRF', options.checkSsrf],
+        ['prompt injection', options.checkPromptInjection], ['API endpoint probes', options.checkApiEndpoints],
+        ['HTTP methods', options.checkHttpMethods], ['rate limiting', options.checkRateLimit],
+        ['sensitive file discovery', options.checkSensitiveFiles],
+    ].filter(([, enabled]) => enabled === false).map(([name]) => name);
+    if (disabledChecks.length) addEvent(scanId, 'initialization', 'warning', 'Checks Disabled',
+        `Not run for this scan: ${disabledChecks.join(', ')}.`, { severity: 'info' });
+
     addEvent(scanId, 'initialization', 'info', 'Baseline Fingerprinting', 'Gathering baseline response for soft-404 detection', {});
     const [baseline, baselineTime] = await Promise.all([
         getBaselineFingerprint(url),
@@ -1971,6 +1986,8 @@ async function runDeterministic(scanId, url, options, completed) {
     if (!reconData.reachable) {
         throw new Error(`Target unreachable: ${url}`);
     }
+    addEvent(scanId, 'initialization', 'info', 'Recon Coverage',
+        `Found ${reconData.params?.length || 0} root query parameter(s), ${reconData.formParams?.length || 0} root form field(s), ${reconData.endpoints?.length || 0} endpoint candidate(s), and ${(reconData.links || []).filter((surface) => (surface.params || []).length > 0).length + (reconData.forms || []).filter((surface) => (surface.params || []).length > 0).length} parameterized link/form surface(s). Discovery is bounded by configured crawl and surface limits.`, {});
     // Persist a compact recon snapshot so reports can render the discovered
     // endpoints section (bounded so the row stays small).
     try {
@@ -1994,11 +2011,27 @@ async function runDeterministic(scanId, url, options, completed) {
     // no forms, no dynamic markup). This is both a big time saver and the
     // single biggest false-positive eliminator: there is nothing to inject
     // into on a static page.
-    const skipInjection = config.scanner.skipStaticInjection && !reconData.dynamic;
+    const hasDiscoveredInputs = (reconData.links || []).some((surface) => (surface.params || []).length > 0) ||
+        (reconData.forms || []).some((surface) => (surface.params || []).length > 0) ||
+        (reconData.endpoints || []).some((endpoint) => (endpoint.parameters || endpoint.params || []).length > 0);
+    const hasLlmEndpoint = (reconData.endpoints || []).some((endpoint) => {
+        try { return LLM_ENDPOINT_RE.test(new URL(endpoint.path, url).pathname); } catch { return false; }
+    });
+    const skipInjection = config.scanner.skipStaticInjection && !reconData.dynamic && !hasDiscoveredInputs;
+    const hasRootQueryParameters = Array.from(new URL(url).searchParams.keys()).length > 0;
+    // When recon has real parameterized links/forms, guessed GET parameters on
+    // the landing URL are low-signal and can consume the whole budget before
+    // those actual application routes are tested. Root query parameters still
+    // get their full checks; discovered inputs are handled by surface fuzzing.
+    const skipRootGuessing = hasDiscoveredInputs && !hasRootQueryParameters;
     options.skipInjection = skipInjection;
+    if (skipRootGuessing) {
+        addEvent(scanId, 'initialization', 'info', 'Prioritizing Discovered Inputs',
+            'Root URL has no query parameters; speculative parameter guesses on it are skipped so discovered parameterized routes and forms receive the request budget.', {});
+    }
     if (skipInjection) {
-        addEvent(scanId, 'initialization', 'info', 'Static Page Detected',
-            'No dynamic parameters or forms found — skipping injection checks to save time and avoid false positives.', {});
+        addEvent(scanId, 'initialization', 'info', 'No Root Input Surface Detected',
+            `Recon found no query parameters, form fields, parameterized discovered surfaces, JSON response, API route, or input controls. Root injection, CORS,${hasLlmEndpoint ? '' : ' prompt-injection,'} and rate-limit probes were skipped; unlinked endpoints and inputs may remain untested.`, { severity: 'info' });
     }
 
     addEvent(scanId, 'tech_fingerprint', 'info', 'Starting Technology Fingerprinting', 'Identifying web technologies in use', {});
@@ -2034,35 +2067,36 @@ async function runDeterministic(scanId, url, options, completed) {
     await Promise.all([headerPromise, corsPromise]);
 
     // Phase 2: SQLi + XSS
-    const sqliPromise = options.checkSqlInjection && !skipInjection
+    const runRootInjection = !skipInjection && !skipRootGuessing;
+    const sqliPromise = options.checkSqlInjection && runRootInjection
         ? checkSqlInjection(scanId, url, baselineTime, ai.sql_injection, options).then(() => { completed.push('sql_injection'); updateProgress(scanId, 52, 'xss', completed); })
         : Promise.resolve();
 
-    const xssPromise = options.checkXss && !skipInjection
+    const xssPromise = options.checkXss && runRootInjection
         ? checkXss(scanId, url, ai.xss, options).then(() => { completed.push('xss'); updateProgress(scanId, 64, 'open_redirect', completed); })
         : Promise.resolve();
 
     await Promise.all([sqliPromise, xssPromise]);
 
     // Phase 3: Open redirects
-    if (options.checkOpenRedirect && !skipInjection) {
+    if (options.checkOpenRedirect && runRootInjection) {
         await checkOpenRedirect(scanId, url, options);
         completed.push('open_redirect');
         updateProgress(scanId, 70, 'http_methods', completed);
     }
 
     // Phase 3b: New active checks (command injection, traversal, SSRF)
-    if (options.checkCommandInjection && !skipInjection) {
+    if (options.checkCommandInjection && runRootInjection) {
         await checkCommandInjection(scanId, url, baselineTime, ai.command_injection, options);
         completed.push('command_injection');
         updateProgress(scanId, 72, 'path_traversal', completed);
     }
-    if (options.checkPathTraversal && !skipInjection) {
+    if (options.checkPathTraversal && runRootInjection) {
         await checkPathTraversal(scanId, url, baseline, ai.path_traversal, options);
         completed.push('path_traversal');
         updateProgress(scanId, 74, 'ssrf', completed);
     }
-    if (options.checkSsrf && !skipInjection) {
+    if (options.checkSsrf && runRootInjection) {
         await checkSsrf(scanId, url, ai.ssrf, options);
         completed.push('ssrf');
         updateProgress(scanId, 76, 'prompt_injection', completed);
@@ -2078,7 +2112,7 @@ async function runDeterministic(scanId, url, options, completed) {
     }
 
     // Phase 3c: Prompt-injection testing (target-side)
-    if (options.checkPromptInjection && !skipInjection) {
+    if (options.checkPromptInjection && ((!skipInjection && !skipRootGuessing) || hasLlmEndpoint)) {
         addEvent(scanId, 'prompt_injection', 'info', 'Testing for Prompt Injection',
             'Probing LLM-facing inputs with canary instructions',
             ai.prompt_injection && ai.prompt_injection.length
@@ -2134,8 +2168,12 @@ async function runDeterministic(scanId, url, options, completed) {
 
     if (scanBudgetExhausted()) {
         addEvent(scanId, 'finalization', 'warning', 'Request Budget Exhausted',
-            'The deterministic scan hit its request/time cap; remaining checks were skipped.', { severity: 'info' });
+            'The deterministic scan hit its request/time cap; remaining checks were skipped. Treat the results as incomplete.', { severity: 'info' });
     }
+
+    const ctx = scanCtx.getStore();
+    if (ctx) addEvent(scanId, 'finalization', (scanBudgetExhausted() || ctx.requestFailures) ? 'warning' : 'info', 'Deterministic Coverage Summary',
+        `Issued ${ctx.requestCount} request(s) of ${ctx.maxRequests ?? 'unlimited'} maximum; ${ctx.requestFailures || 0} request(s) failed${ctx.deadline ? `; ${Math.max(0, Math.ceil((ctx.deadline - Date.now()) / 1000))} second(s) remained` : ''}.${(scanBudgetExhausted() || ctx.requestFailures) ? ' Treat coverage as incomplete.' : ''}`, { severity: (scanBudgetExhausted() || ctx.requestFailures) ? 'info' : undefined });
 
     completed.push('finalization');
     updateProgress(scanId, 95, 'finalization', completed);
@@ -2237,8 +2275,9 @@ async function runScan(scanId, url, options = {}) {
     const ctx = {
         scanId,
         requestCount: 0,
+        requestFailures: 0,
         maxRequests: options.maxRequests ?? config.scanner.maxRequests,
-        deadline: options.maxSeconds != null ? Date.now() + options.maxSeconds * 1000 : null,
+        deadline: Date.now() + (options.maxSeconds ?? config.scanner.maxSeconds) * 1000,
         isCancelled: () => cancelledScans.has(scanId),
         budgetExhausted: false,
         cancelled: false,
@@ -2254,15 +2293,25 @@ async function runScan(scanId, url, options = {}) {
             const useAgent = (mode === 'agent' || mode === 'hybrid') && config.llm.enabled;
 
             if (useAgent) {
-                if (mode === 'hybrid') {
-                    await runDeterministic(scanId, url, options, completed);
-                }
-                addEvent(scanId, 'agent', 'info', 'Starting Autonomous Agent',
-                    `Mode: ${mode}. The model will decide actions dynamically.`, {});
-                await agentLoop.runAgent(scanId, url, {
-                    useAi: true,
-                    baselineTime: undefined,
-                }, {
+                // Keep the deterministic coverage battery in every AI mode.
+                // The agent adds adaptive probes, but cannot silently replace
+                // fixed checks when the model stops early or misses a surface.
+                const baselineOptions = mode === 'agent' ? { ...options, useAi: false } : options;
+                await runDeterministic(scanId, url, baselineOptions, completed);
+                const remainingRequests = Math.max(0, ctx.maxRequests - ctx.requestCount);
+                const remainingSeconds = Math.max(0, Math.floor((ctx.deadline - Date.now()) / 1000));
+                if (scanBudgetExhausted() || remainingRequests === 0 || remainingSeconds === 0) {
+                    addEvent(scanId, 'agent', 'warning', 'Agent Probes Skipped',
+                        'The deterministic phase used the shared request or time budget; adaptive agent probes were not started. Treat coverage as incomplete.', { severity: 'info' });
+                } else {
+                    addEvent(scanId, 'agent', 'info', 'Starting Autonomous Agent',
+                        `Mode: ${mode}. The model will add adaptive probes within the remaining shared scan budget.`, {});
+                    const agentResult = await agentLoop.runAgent(scanId, url, {
+                        useAi: true,
+                        baselineTime: undefined,
+                        maxRequests: Math.min(config.agent.maxRequests, remainingRequests),
+                        maxSeconds: Math.min(config.agent.maxSeconds, remainingSeconds),
+                    }, {
                     addEvent,
                     addVuln,
                     updateProgress: (id, pct, stage, stgs) => updateProgress(id, pct, stage, stgs),
@@ -2277,7 +2326,11 @@ async function runScan(scanId, url, options = {}) {
                         } catch { /* ignore */ }
                     },
                     isCancelled: () => cancelledScans.has(scanId),
-                });
+                    });
+                    const agentComplete = agentResult.stopped === 'finished' && !agentResult.requestFailures;
+                    addEvent(scanId, 'agent', agentComplete ? 'info' : 'warning', 'Agent Coverage Summary',
+                        `Agent stopped: ${agentResult.stopped}; ${agentResult.steps} step(s), ${agentResult.requestCount} scanner-issued request call(s), ${agentResult.requestFailures} failed call(s), ${agentResult.findings} finding(s), ${agentResult.elapsedSeconds}s elapsed. Total scan request calls: ${ctx.requestCount + agentResult.requestCount}/${ctx.maxRequests}.${agentComplete ? '' : ' Agent coverage may be incomplete.'}`, { severity: agentComplete ? undefined : 'info' });
+                }
             } else {
                 if (mode !== 'deterministic' && !config.llm.enabled) {
                     addEvent(scanId, 'initialization', 'info', 'AI Disabled',

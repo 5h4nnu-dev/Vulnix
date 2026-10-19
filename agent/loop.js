@@ -64,6 +64,8 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         maxSeconds: options.maxSeconds || config.agent.maxSeconds,
     });
 
+    return tools.withRequestBudget(memory, async () => {
+
     emit('agent', 'info', 'Agent Initialized', `Autonomous mode — provider=${config.llm.provider}, budget=${memory.maxSteps} steps / ${memory.maxRequests} requests`, {});
 
     const baseline = await quickRecon(url);
@@ -235,8 +237,10 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         summary: memory.summary,
         stopped,
         requestCount: memory.requestCount,
+        requestFailures: memory.requestFailures,
         elapsedSeconds: Math.round(memory.elapsedSeconds()),
     };
+    });
 }
 
 module.exports = { runAgent, buildSystemPrompt };

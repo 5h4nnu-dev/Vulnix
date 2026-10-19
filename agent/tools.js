@@ -11,6 +11,8 @@ const UA = 'Vulnix-Agent/1.0';
 const payloadGenerator = require('../llm/payloadGenerator');
 const { parseHtml } = require('../surfaces');
 const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('../xss-guards');
+const { AsyncLocalStorage } = require('node:async_hooks');
+const requestBudget = new AsyncLocalStorage();
 
 // ── Small self-contained helpers (avoid coupling to scanner.js) ───────────────
 
@@ -31,6 +33,16 @@ function headersToObj(headers) {
 }
 
 async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
+    const budget = requestBudget.getStore();
+    if (budget) {
+        const remainingMs = budget.memory.maxSeconds * 1000 - (Date.now() - budget.memory.startedAt);
+        if (budget.memory.requestCount >= budget.memory.maxRequests || remainingMs <= 0) {
+            budget.exhausted = true;
+            return null;
+        }
+        budget.memory.incrementRequests();
+        timeoutMs = Math.min(timeoutMs, remainingMs);
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -39,8 +51,13 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
         return resp;
     } catch {
         clearTimeout(timer);
+        if (budget) budget.memory.requestFailures += 1;
         return null;
     }
+}
+
+function withRequestBudget(memory, fn) {
+    return requestBudget.run({ memory, exhausted: false }, fn);
 }
 
 async function readBody(resp, maxLen = 20000) {
@@ -112,7 +129,13 @@ async function detectSqlInjection(url, param, payload, baseline) {
     for (const pattern of SQL_ERROR_PATTERNS) {
         if (baselinePatterns.includes(pattern)) continue;
         const m = body.match(pattern);
-        if (m) return { vulnerable: true, technique: 'error', evidence: `DB error: ${m[0]}`, status: resp.status };
+        if (m) {
+            const nearby = body.slice(Math.max(0, m.index - 40), m.index + m[0].length + 100);
+            const fragment = String(payload).slice(0, 8);
+            if (nearby.includes(payload) || nearby.includes(fragment)) {
+                return { vulnerable: true, technique: 'error', evidence: `DB error echoed input: ${m[0]}`, status: resp.status };
+            }
+        }
     }
     if (/sleep|pg_sleep|waitfor|benchmark/i.test(payload)) {
         // Relative delta over the baseline plus a confirmation request, so
@@ -127,15 +150,20 @@ async function detectSqlInjection(url, param, payload, baseline) {
             }
         }
     }
-    if (/1=1/.test(payload) && baseline?.bodyLength > 0) {
-        const falsePayload = payload.replace('1=1', '1=2');
-        const falseResp = await fetchSafe(buildRequestUrl(url, param, falsePayload), { headers: { 'User-Agent': UA } });
-        if (falseResp) {
-            const falseBody = await readBody(falseResp);
-            const base = Math.max(baseline.bodyLength, 1);
-            if (Math.abs(body.length - base) / base < 0.15 && Math.abs(falseBody.length - base) / base > 0.25) {
-                return { vulnerable: true, technique: 'boolean', evidence: `TRUE ${body.length}B vs FALSE ${falseBody.length}B vs base ${baseline.bodyLength}B`, status: resp.status };
-            }
+    if (/1=1/.test(payload)) {
+        const falsePayloads = [payload.replace('1=1', '1=2'), payload.replace('1=1', '1=3')];
+        const falseLengths = [];
+        for (const falsePayload of falsePayloads) {
+            const falseResp = await fetchSafe(buildRequestUrl(url, param, falsePayload), { headers: { 'User-Agent': UA } });
+            falseLengths.push(falseResp ? (await readBody(falseResp)).length : null);
+        }
+        const [falseA, falseB] = falseLengths;
+        const scale = Math.max(body.length, falseA || 0, falseB || 0, 1);
+        if (falseA != null && falseB != null &&
+            Math.abs(falseA - falseB) / scale < 0.15 &&
+            Math.abs(body.length - falseA) / scale > 0.25 &&
+            Math.abs(body.length - falseB) / scale > 0.25) {
+            return { vulnerable: true, technique: 'boolean', evidence: `TRUE ${body.length}B vs FALSE controls ${falseA}/${falseB}B (controls agree and differ from TRUE)`, status: resp.status };
         }
     }
     return { vulnerable: false, reason: 'no SQLi indicator', status: resp.status };
@@ -161,7 +189,7 @@ async function detectXss(url, param, payload) {
     const body = await readBody(resp);
     const idx = body.indexOf(payload);
     if (idx === -1) return { vulnerable: false, reason: 'no unencoded reflection (encoded output is safe)', status: resp.status };
-    if (isInsideHtmlComment(body, idx) || isInsideQuotedAttribute(body, idx, payload)) {
+    if (isInsideHtmlComment(body, idx, payload) || isInsideQuotedAttribute(body, idx, payload)) {
         return { vulnerable: false, reason: 'reflection is inert (comment/attribute)', status: resp.status };
     }
     if (!hasExecutableXssToken(payload)) {
@@ -177,6 +205,18 @@ async function detectCommandInjection(url, param, payload, baseline) {
     const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } }, 15000);
     const duration = Date.now() - start;
     if (!resp) return { vulnerable: false, reason: 'no response' };
+    const body = await readBody(resp);
+    const outputSigns = [
+        /uid=\d+\([^)]+\)\s+gid=\d+/i, /root:.*:0:0:/,
+        /\bwww-data\b/i, /nt authority\\system/i,
+        /for 16-bit app support/i, /\[extensions\]/i,
+    ];
+    const baselineBody = String(baseline?.body || '');
+    const hadSignatures = outputSigns.some((re) => re.test(baselineBody));
+    if (!hadSignatures) {
+        const matched = outputSigns.find((re) => re.test(body));
+        if (matched) return { vulnerable: true, technique: 'command_output', evidence: `command output signature: ${body.match(matched)[0]}`, status: resp.status };
+    }
     if (/sleep|timeout|ping/i.test(payload)) {
         // Relative delta over baseline + confirmation request (see SQLi).
         const threshold = Math.max(3000, (baseline?.time || 1000) + 3000);
@@ -192,7 +232,7 @@ async function detectCommandInjection(url, param, payload, baseline) {
     return { vulnerable: false, reason: 'no command-injection indicator', status: resp.status };
 }
 
-async function detectPathTraversal(url, param, payload) {
+async function detectPathTraversal(url, param, payload, baseline) {
     const target = buildRequestUrl(url, param, payload);
     if (!target) return { vulnerable: false, reason: 'invalid URL' };
     const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
@@ -200,7 +240,7 @@ async function detectPathTraversal(url, param, payload) {
     const body = await readBody(resp);
     for (const sig of TRAVERSAL_SIGNATURES) {
         const m = body.match(sig);
-        if (m) return { vulnerable: true, technique: 'file_disclosure', evidence: `signature matched: ${m[0]}`, status: resp.status };
+        if (m && !sig.test(String(baseline?.body || ''))) return { vulnerable: true, technique: 'file_disclosure', evidence: `signature matched: ${m[0]}`, status: resp.status };
     }
     return { vulnerable: false, reason: 'no traversal signature', status: resp.status };
 }
@@ -331,7 +371,6 @@ async function execute(name, args, state) {
 
         case 'crawl': {
             const base = new URL(a.path || '/', state.targetUrl).toString();
-            state.memory.incrementRequests();
             const resp = await fetchSafe(base, { headers: { 'User-Agent': UA } });
             if (!resp) return { ok: false, error: 'crawl failed' };
             const body = await readBody(resp);
@@ -360,7 +399,6 @@ async function execute(name, args, state) {
         }
 
         case 'fingerprint': {
-            state.memory.incrementRequests();
             const resp = await fetchSafe(state.targetUrl, { headers: { 'User-Agent': UA } });
             if (!resp) return { ok: false, error: 'fingerprint failed' };
             const body = await readBody(resp);
@@ -401,28 +439,28 @@ async function execute(name, args, state) {
             const detector = DETECTORS[vulnType];
             if (!detector) return { ok: false, error: `unsupported vuln_type: ${vulnType}` };
             const payload = a.payload || (DEFAULT_PAYLOADS[vulnType] || [''])[0];
-            state.memory.incrementRequests();
             const result = await detector(a.endpoint, a.param, payload, state.baseline);
             return { ok: true, vuln_type: vulnType, param: a.param, payload_used: payload, result };
         }
 
         case 'record_finding': {
-            let hasEvidence = false;
-            const obs = state.lastTest && state.lastTest.observation ? state.lastTest.observation : null;
-            if (obs && obs.result && obs.result.vulnerable === true) hasEvidence = true;
-            if (a && a.evidence && String(a.evidence).trim().length > 0) hasEvidence = true;
-            if (!hasEvidence) {
-                return { ok: false, error: 'no concrete evidence from a recent test_parameter result (result.vulnerable===true) or evidence field' };
+            const test = state.lastTest;
+            const obs = test && test.observation ? test.observation : null;
+            if (!obs || !obs.result || obs.result.vulnerable !== true) {
+                return { ok: false, error: 'a finding requires a recent positive test_parameter result' };
+            }
+            if (a.type && a.type !== obs.vuln_type) {
+                return { ok: false, error: `finding type must match tested type ${obs.vuln_type}` };
             }
 
             const finding = {
-                type: a.type,
+                type: obs.vuln_type,
                 severity: a.severity || 'medium',
                 title: a.title,
                 description: a.description,
-                affectedEndpoint: a.endpoint,
-                payload: a.payload || (obs && obs.result && obs.result.evidence ? null : (state.lastTest && state.lastTest.args && state.lastTest.args.payload) || null),
-                evidence: a.evidence || (obs && obs.result && (obs.result.evidence || `vulnerable:true via ${obs.result.technique || 'detector'}`)) || 'detector-reported evidence',
+                affectedEndpoint: test.args.endpoint,
+                payload: obs.payload_used || test.args.payload || null,
+                evidence: obs.result.evidence || `vulnerable:true via ${obs.result.technique || 'detector'}`,
                 remediation: a.remediation || 'Review and remediate according to the finding type.',
                 source: 'ai',
             };
@@ -445,4 +483,4 @@ async function execute(name, args, state) {
     }
 }
 
-module.exports = { execute, DEFAULT_PAYLOADS, DETECTORS };
+module.exports = { execute, DEFAULT_PAYLOADS, DETECTORS, withRequestBudget };

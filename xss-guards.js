@@ -18,11 +18,20 @@ function hasExecutableXssToken(payload) {
     return XSS_EXEC_TOKEN.test(payload);
 }
 
-function isInsideHtmlComment(body, idx) {
+function isInsideHtmlComment(body, idx, payload = '') {
     const open = body.lastIndexOf('<!--', idx);
     if (open === -1) return false;
     const close = body.lastIndexOf('-->', idx);
-    return close < open;
+    const insideAtReflection = close < open;
+    if (!insideAtReflection || !payload) return insideAtReflection;
+
+    // A payload can begin inside a comment and deliberately close it before
+    // emitting an executable token (for example `text--><script>...`). Check
+    // the token's final reflected context instead of rejecting at payload start.
+    const tokenOffset = payload.search(XSS_EXEC_TOKEN);
+    const commentCloseOffset = payload.indexOf('-->');
+    if (tokenOffset < 0 || commentCloseOffset < 0 || tokenOffset < commentCloseOffset + 3) return true;
+    return isInsideHtmlComment(body, idx + tokenOffset);
 }
 
 // True when `idx` sits inside a quoted HTML attribute value AND the payload
