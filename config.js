@@ -76,6 +76,7 @@ const config = {
     // Server
     host: process.env.SERVER_HOST || '127.0.0.1',
     port: toInt(process.env.PORT, 5000),
+    apiToken: process.env.VULNIX_API_TOKEN || '',
 
     // LLM provider
     llm: {

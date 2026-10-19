@@ -95,10 +95,24 @@ function redactBody(body, maxLen = 4000) {
     return redacted.slice(0, maxLen) + `\n...[truncated ${redacted.length - maxLen} chars]`;
 }
 
+/** Recursively scrub secret-like values before agent observations reach an LLM. */
+function redactObject(value, key = '') {
+    if (/(?:authorization|cookie|token|secret|password|passwd|api[_-]?key|csrf|xsrf|viewstate|eventvalidation)/i.test(key)) {
+        return REDACT;
+    }
+    if (typeof value === 'string') return redactString(value);
+    if (Array.isArray(value)) return value.map((item) => redactObject(item));
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactObject(v, k)]));
+    }
+    return value;
+}
+
 module.exports = {
     REDACT,
     redactString,
     redactHeaders,
     redactBody,
+    redactObject,
     SENSITIVE_HEADERS,
 };

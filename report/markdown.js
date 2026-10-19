@@ -74,7 +74,11 @@ function generate(scan, vulns, events, extras = {}) {
             md += `---\n\n`;
         }
     } else {
-        md += `## ✅ No Vulnerabilities Found\n\nThe scan completed without detecting any exploitable vulnerabilities.\n\n`;
+        if (scan.status === 'completed') {
+            md += `## ✅ No Vulnerabilities Found\n\nThe scan completed without detecting any exploitable vulnerabilities in the tested surfaces. This does not establish that undiscovered or untested areas are vulnerability-free.\n\n`;
+        } else {
+            md += `## ⚠️ No Findings Recorded\n\nThe scan status is **${scan.status || 'unknown'}**. Coverage was incomplete, so the absence of findings must not be interpreted as evidence that the target is vulnerability-free.\n\n`;
+        }
     }
 
     if (hardening.length > 0) {

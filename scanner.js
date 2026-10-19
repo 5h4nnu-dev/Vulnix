@@ -3,6 +3,8 @@ const { v4: uuid } = require('uuid');
 const { AsyncLocalStorage } = require('async_hooks');
 const payloadEngine = require('./payloads');
 const config = require('./config');
+const { checkResolvedScope } = require('./agent/policy');
+const { applyCookies, captureCookies } = require('./http/session');
 const recon = require('./recon');
 const surfaces = require('./surfaces');
 const payloadGenerator = require('./llm/payloadGenerator');
@@ -158,6 +160,7 @@ const UA = 'SecureProbe/2.0';
 // exactly as before — unbounded and uncancellable.
 
 const scanCtx = new AsyncLocalStorage();
+const responseTimers = new WeakMap();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -165,9 +168,38 @@ function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
 }
 
+function bindBodyTimeout(resp, timer, onError) {
+    responseTimers.set(resp, timer);
+    for (const method of ['text', 'json', 'arrayBuffer', 'blob', 'formData']) {
+        if (typeof resp[method] !== 'function') continue;
+        const read = resp[method].bind(resp);
+        Object.defineProperty(resp, method, {
+            configurable: true,
+            value: (...args) => Promise.resolve(read(...args)).catch((err) => {
+                if (onError) onError();
+                throw err;
+            }).finally(() => {
+                clearTimeout(responseTimers.get(resp));
+                responseTimers.delete(resp);
+            }),
+        });
+    }
+    return resp;
+}
+
 async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const ctx = scanCtx.getStore();
+    let currentUrl = String(url);
+    const requestOpts = { ...opts };
+    const callerHeaders = { ...(requestOpts.headers || {}) };
+    const maxRedirects = requestOpts.redirect === 'manual' ? 0 : 5;
+    for (let hop = 0; hop <= maxRedirects; hop++) {
     if (ctx) {
+        const scope = await checkResolvedScope(currentUrl, ctx.targetUrl);
+        if (!scope.allowed) {
+            ctx.scopeBlocked = (ctx.scopeBlocked || 0) + 1;
+            return null;
+        }
         if (typeof ctx.isCancelled === 'function' && ctx.isCancelled()) {
             ctx.cancelled = true;
             return null;
@@ -193,18 +225,40 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const resp = await fetch(url, {
-            redirect: 'follow',
-            ...opts,
+        requestOpts.headers = applyCookies(currentUrl, callerHeaders, ctx?.cookies);
+        const resp = await fetch(currentUrl, {
+            redirect: 'manual',
+            ...requestOpts,
             signal: controller.signal
         });
+        captureCookies(currentUrl, resp.headers, ctx?.cookies);
+        const onBodyError = ctx ? () => { ctx.requestFailures = (ctx.requestFailures || 0) + 1; } : null;
+        if (requestOpts.redirect === 'manual' || ![301, 302, 303, 307, 308].includes(resp.status) || !resp.headers.get('location')) return bindBodyTimeout(resp, timer, onBodyError);
+        if (hop === maxRedirects) return bindBodyTimeout(resp, timer, onBodyError);
+        const nextUrl = new URL(resp.headers.get('location'), currentUrl).toString();
+        if (ctx && !(await checkResolvedScope(nextUrl, ctx.targetUrl)).allowed) {
+            clearTimeout(timer);
+            ctx.scopeBlocked = (ctx.scopeBlocked || 0) + 1;
+            return null;
+        }
         clearTimeout(timer);
-        return resp;
+        if (new URL(currentUrl).origin !== new URL(nextUrl).origin) {
+            for (const key of Object.keys(callerHeaders)) {
+                if (/^(?:authorization|cookie|proxy-authorization)$/i.test(key)) delete callerHeaders[key];
+            }
+        }
+        currentUrl = nextUrl;
+        if ([301, 302, 303].includes(resp.status) && requestOpts.method && !['GET', 'HEAD'].includes(String(requestOpts.method).toUpperCase())) {
+            requestOpts.method = 'GET';
+            delete requestOpts.body;
+        }
     } catch {
         clearTimeout(timer);
         if (ctx) ctx.requestFailures = (ctx.requestFailures || 0) + 1;
         return null;
     }
+    }
+    return null;
 }
 
 function scanCancelled() {
@@ -1798,8 +1852,30 @@ async function runPromptInjectionProbes(url, opts = {}, onResult) {
  * @returns {Promise<{canary: string, tests: object[], detected: number}>}
  */
 async function probePromptInjectionEndpoint(url, opts = {}) {
-    const { canary, tests } = await runPromptInjectionProbes(url, opts);
-    return { canary, tests, detected: tests.filter((t) => t.detected).length };
+    const run = async () => {
+        const { canary, tests } = await runPromptInjectionProbes(url, opts);
+        const ctx = scanCtx.getStore();
+        return {
+            canary,
+            tests,
+            detected: tests.filter((t) => t.detected).length,
+            requestCount: ctx?.requestCount ?? null,
+            requestFailures: ctx?.requestFailures ?? 0,
+            scopeBlocked: ctx?.scopeBlocked ?? 0,
+        };
+    };
+    if (scanCtx.getStore()) return run();
+    const ctx = {
+        targetUrl: url,
+        requestCount: 0,
+        requestFailures: 0,
+        scopeBlocked: 0,
+        maxRequests: Math.min(config.scanner.maxRequests, 60),
+        deadline: Date.now() + Math.min(config.scanner.maxSeconds, 60) * 1000,
+        cookies: new Map(),
+        isCancelled: () => false,
+    };
+    return scanCtx.run(ctx, run);
 }
 
 async function checkPromptInjection(scanId, url, opts = {}) {
@@ -1973,7 +2049,7 @@ async function runDeterministic(scanId, url, options, completed) {
     // content type, discovered parameters and form fields, a verdict on
     // whether the page is dynamic at all, plus (when enabled) same-origin API
     // endpoint candidates mined from the page and its JS bundles.
-    const scanDiscovery = config.scanDiscovery || {};
+    const scanDiscovery = config.scanner.scanDiscovery;
     const reconData = await recon.runRecon(url, fetchSafe, {
         discover: true,
         maxDepth: scanDiscovery.maxDepth,
@@ -2060,7 +2136,7 @@ async function runDeterministic(scanId, url, options, completed) {
         ? checkSecurityHeaders(scanId, url, options).then(() => { completed.push('headers_analysis'); updateProgress(scanId, 25, 'cors_analysis', completed); })
         : Promise.resolve();
 
-    const corsPromise = options.checkCors && !skipInjection
+    const corsPromise = options.checkCors
         ? checkCors(scanId, url, options).then(() => { completed.push('cors_analysis'); updateProgress(scanId, 38, 'sql_injection', completed); })
         : Promise.resolve();
 
@@ -2132,7 +2208,7 @@ async function runDeterministic(scanId, url, options, completed) {
         ? checkSensitiveFiles(scanId, url, baseline, options).then(() => { completed.push('file_discovery'); updateProgress(scanId, 92, 'rate_limit', completed); })
         : Promise.resolve();
 
-    const ratePromise = options.checkRateLimit && !skipInjection
+    const ratePromise = options.checkRateLimit
         ? checkRateLimit(scanId, url, options).then(() => { completed.push('rate_limit'); })
         : Promise.resolve();
 
@@ -2173,7 +2249,7 @@ async function runDeterministic(scanId, url, options, completed) {
 
     const ctx = scanCtx.getStore();
     if (ctx) addEvent(scanId, 'finalization', (scanBudgetExhausted() || ctx.requestFailures) ? 'warning' : 'info', 'Deterministic Coverage Summary',
-        `Issued ${ctx.requestCount} request(s) of ${ctx.maxRequests ?? 'unlimited'} maximum; ${ctx.requestFailures || 0} request(s) failed${ctx.deadline ? `; ${Math.max(0, Math.ceil((ctx.deadline - Date.now()) / 1000))} second(s) remained` : ''}.${(scanBudgetExhausted() || ctx.requestFailures) ? ' Treat coverage as incomplete.' : ''}`, { severity: (scanBudgetExhausted() || ctx.requestFailures) ? 'info' : undefined });
+        `Issued ${ctx.requestCount} request(s) of ${ctx.maxRequests ?? 'unlimited'} maximum; ${ctx.requestFailures || 0} request(s) failed; ${ctx.scopeBlocked || 0} out-of-scope redirect(s) blocked${ctx.deadline ? `; ${Math.max(0, Math.ceil((ctx.deadline - Date.now()) / 1000))} second(s) remained` : ''}.${(scanBudgetExhausted() || ctx.requestFailures || ctx.scopeBlocked) ? ' Treat coverage as incomplete.' : ''}`, { severity: (scanBudgetExhausted() || ctx.requestFailures || ctx.scopeBlocked) ? 'info' : undefined });
 
     completed.push('finalization');
     updateProgress(scanId, 95, 'finalization', completed);
@@ -2200,7 +2276,7 @@ async function enrichVulns(vulns) {
     }
 }
 
-async function finalizeScan(scanId, completed, options, url) {
+async function finalizeScan(scanId, completed, options, url, status = 'completed') {
     const vulns = stmts.getVulns.all(scanId);
 
     if (options.useAi && config.llm.enabled && !cancelledScans.has(scanId)) {
@@ -2225,7 +2301,7 @@ async function finalizeScan(scanId, completed, options, url) {
     } catch { /* ignore */ }
 
     let executiveSummary = null;
-    if (options.useAi && config.llm.enabled) {
+    if (status === 'completed' && options.useAi && config.llm.enabled) {
         try {
             const pseudo = {
                 url,
@@ -2244,8 +2320,11 @@ async function finalizeScan(scanId, completed, options, url) {
         } catch { /* ignore */ }
     }
 
+    if (cancelledScans.has(scanId)) status = 'cancelled';
+
     stmts.completeScan.run({
         id: scanId,
+        status,
         risk_score: score,
         risk_level: level,
         vulnerability_count: vulnerabilities.length,
@@ -2259,9 +2338,11 @@ async function finalizeScan(scanId, completed, options, url) {
         stages_completed: JSON.stringify(completed),
     });
 
-    addEvent(scanId, 'finalization', 'info', 'Scan Completed',
-        `Found ${vulnerabilities.length} vulnerabilities and ${hardening.length} hardening gaps. Risk score: ${score}/100 (${level})`,
-        { severity: level });
+    const completionTitle = status === 'completed' ? 'Scan Completed' : status === 'cancelled' ? 'Scan Cancelled' : 'Scan Incomplete';
+    const completionNote = status === 'completed' ? '' : ' Coverage is incomplete; absence of findings is not evidence that the target is vulnerability-free.';
+    addEvent(scanId, 'finalization', status === 'completed' ? 'info' : 'warning', completionTitle,
+        `Found ${vulnerabilities.length} vulnerabilities and ${hardening.length} hardening gaps. Risk score: ${score}/100 (${level}).${completionNote}`,
+        { severity: status === 'completed' ? level : 'info' });
 
     console.log(`[scan:${scanId}] completed — ${vulnerabilities.length} vulns (+${hardening.length} hardening), risk ${score}/100 (${level})`);
 }
@@ -2269,12 +2350,15 @@ async function finalizeScan(scanId, completed, options, url) {
 async function runScan(scanId, url, options = {}) {
     const completed = [];
     const mode = options.mode || 'deterministic';
+    let agentCoverageComplete = true;
 
     // Per-scan context shared by every fetchSafe() call beneath it: the
     // request budget, the wall-clock deadline and the cancellation flag.
     const ctx = {
         scanId,
+        targetUrl: url,
         requestCount: 0,
+        cookies: new Map(),
         requestFailures: 0,
         maxRequests: options.maxRequests ?? config.scanner.maxRequests,
         deadline: Date.now() + (options.maxSeconds ?? config.scanner.maxSeconds) * 1000,
@@ -2290,6 +2374,11 @@ async function runScan(scanId, url, options = {}) {
             stmts.updateScanRunning.run(scanId);
             addEvent(scanId, 'initialization', 'info', 'Scan Initialized', `Starting ${mode} security analysis for ${url}`, {});
 
+            if (cancelledScans.has(scanId)) {
+                await finalizeScan(scanId, completed, options, url, 'cancelled');
+                return;
+            }
+
             const useAgent = (mode === 'agent' || mode === 'hybrid') && config.llm.enabled;
 
             if (useAgent) {
@@ -2301,6 +2390,7 @@ async function runScan(scanId, url, options = {}) {
                 const remainingRequests = Math.max(0, ctx.maxRequests - ctx.requestCount);
                 const remainingSeconds = Math.max(0, Math.floor((ctx.deadline - Date.now()) / 1000));
                 if (scanBudgetExhausted() || remainingRequests === 0 || remainingSeconds === 0) {
+                    agentCoverageComplete = false;
                     addEvent(scanId, 'agent', 'warning', 'Agent Probes Skipped',
                         'The deterministic phase used the shared request or time budget; adaptive agent probes were not started. Treat coverage as incomplete.', { severity: 'info' });
                 } else {
@@ -2327,9 +2417,10 @@ async function runScan(scanId, url, options = {}) {
                     },
                     isCancelled: () => cancelledScans.has(scanId),
                     });
-                    const agentComplete = agentResult.stopped === 'finished' && !agentResult.requestFailures && agentResult.coverageComplete;
+                    const agentComplete = agentResult.stopped === 'finished' && !agentResult.requestFailures && !agentResult.scopeBlocked && agentResult.coverageComplete;
+                    agentCoverageComplete = agentComplete;
                     addEvent(scanId, 'agent', agentComplete ? 'info' : 'warning', 'Agent Coverage Summary',
-                        `Agent stopped: ${agentResult.stopped}; ${agentResult.steps} step(s), ${agentResult.requestCount} scanner-issued request call(s), ${agentResult.requestFailures} failed call(s), ${agentResult.findings} finding(s), ${agentResult.elapsedSeconds}s elapsed, discovered-parameter coverage ${agentResult.coverageComplete ? 'complete' : 'incomplete'}. Total scan request calls: ${ctx.requestCount + agentResult.requestCount}/${ctx.maxRequests}.${agentComplete ? '' : ' Agent coverage may be incomplete.'}`, { severity: agentComplete ? undefined : 'info' });
+                        `Agent stopped: ${agentResult.stopped}; ${agentResult.steps} step(s), ${agentResult.requestCount} request(s), ${agentResult.requestFailures} failed call(s), ${agentResult.scopeBlocked} out-of-scope redirect(s) blocked, ${agentResult.findings} finding(s), ${agentResult.elapsedSeconds}s elapsed, discovered-parameter coverage ${agentResult.coverageComplete ? 'complete' : 'incomplete'}. Total scan request calls: ${ctx.requestCount + agentResult.requestCount}/${ctx.maxRequests}.${agentComplete ? '' : ' Agent coverage may be incomplete.'}`, { severity: agentComplete ? undefined : 'info' });
                 }
             } else {
                 if (mode !== 'deterministic' && !config.llm.enabled) {
@@ -2339,12 +2430,18 @@ async function runScan(scanId, url, options = {}) {
                 await runDeterministic(scanId, url, options, completed);
             }
 
-            await finalizeScan(scanId, completed, options, url);
+            const cancelled = cancelledScans.has(scanId) || ctx.cancelled;
+            const incomplete = !cancelled && (ctx.budgetExhausted || ctx.requestFailures > 0 || ctx.scopeBlocked > 0 || !agentCoverageComplete);
+            await finalizeScan(scanId, completed, options, url, cancelled ? 'cancelled' : incomplete ? 'incomplete' : 'completed');
         });
     } catch (err) {
         console.error(`[scan:${scanId}] failed:`, err);
-        stmts.failScan.run(scanId);
-        addEvent(scanId, 'finalization', 'error', 'Scan Failed', String(err), { severity: 'info' });
+        if (cancelledScans.has(scanId) || ctx.cancelled) {
+            try { await finalizeScan(scanId, completed, options, url, 'cancelled'); } catch { stmts.failScan.run(scanId); }
+        } else {
+            stmts.failScan.run(scanId);
+            addEvent(scanId, 'finalization', 'error', 'Scan Failed', String(err), { severity: 'info' });
+        }
     } finally {
         recordedFindings.delete(scanId);
         cancelledScans.delete(scanId);

@@ -31,7 +31,9 @@ const TOOLS = {
         description: 'Ask the model to write custom payloads for a vulnerability class and parameter.',
         parameters: {
             vuln_type: { type: 'string', required: true, description: 'sql_injection | xss | command_injection | path_traversal | ssrf | open_redirect | prompt_injection' },
+            endpoint: { type: 'string', required: false },
             param: { type: 'string', required: false },
+            method: { type: 'string', enum: ['GET', 'POST'], required: false, default: 'GET' },
             notes: { type: 'string', required: false },
         },
     },
@@ -45,6 +47,7 @@ const TOOLS = {
             fields: { type: 'object', required: false, description: 'Existing form fields to preserve during POST testing' },
             content_type: { type: 'string', enum: ['application/x-www-form-urlencoded', 'application/json'], required: false },
             payload: { type: 'string', required: false, description: 'Custom payload; omit to use a sensible default' },
+            payloads: { type: 'array', required: false, description: 'Up to eight payload strings or generated payload objects; the harness extracts, bounds, and tests them' },
         },
     },
     record_finding: {

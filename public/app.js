@@ -3,6 +3,25 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 let currentScanId = null;
 let pollInterval = null;
+let apiToken = sessionStorage.getItem('vulnixApiToken') || '';
+
+async function apiFetch(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+  let resp = await fetch(url, { ...opts, headers });
+  if (resp.status === 401) {
+    const entered = prompt('Enter the Vulnix API token configured as VULNIX_API_TOKEN:');
+    if (!entered) return resp;
+    apiToken = entered;
+    sessionStorage.setItem('vulnixApiToken', apiToken);
+    resp = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${apiToken}` } });
+    if (resp.status === 401) {
+      sessionStorage.removeItem('vulnixApiToken');
+      apiToken = '';
+    }
+  }
+  return resp;
+}
 
 function navigateTo(page, data) {
   $$('.page').forEach((p) => p.classList.remove('active'));
@@ -23,7 +42,7 @@ $$('.nav-item').forEach((item) => {
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const resp = await fetch(`/api${path}`, opts);
+  const resp = await apiFetch(`/api${path}`, opts);
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error(err.error || err.message || 'Request failed');
@@ -214,11 +233,14 @@ function startPolling(scanId) {
         }
       }
 
-      if (status.status === 'completed' || status.status === 'failed') {
+      if (['completed', 'incomplete', 'cancelled', 'failed'].includes(status.status)) {
         stopPolling();
-        $('#scan-status-text').textContent = status.status === 'completed' ? 'Scan Complete!' : 'Scan Failed';
-        $('#scan-progress-bar').style.width = '100%';
-        $('#scan-progress-percent').textContent = '100%';
+        const labels = { completed: 'Scan Complete!', incomplete: 'Scan Incomplete — coverage limited', cancelled: 'Scan Cancelled', failed: 'Scan Failed' };
+        $('#scan-status-text').textContent = labels[status.status];
+        if (status.status === 'completed') {
+          $('#scan-progress-bar').style.width = '100%';
+          $('#scan-progress-percent').textContent = '100%';
+        }
         setTimeout(() => {
           navigateTo('scan-detail', { id: scanId });
           $('#scan-progress-card').classList.add('hidden');
@@ -360,7 +382,7 @@ async function loadScanDetail(scanId) {
       vulnsContainer.innerHTML = `
         <div class="card" style="margin-top:22px">
           <div class="card-body">
-            <div class="empty-state" style="color:var(--success)">No vulnerabilities found!</div>
+            <div class="empty-state" style="color:${scan.status === 'completed' ? 'var(--success)' : 'var(--warning)'}">${scan.status === 'completed' ? 'No vulnerabilities found in the tested surfaces.' : `No findings recorded — scan ${escapeHtml(scan.status || 'status unknown')}; coverage is incomplete.`}</div>
             ${hardeningList.length > 0 ? `
               <h2 style="font-size:0.85rem;font-weight:700;margin:16px 0 10px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.06em">
                 Hardening Gaps (${hardeningList.length})
@@ -554,7 +576,7 @@ function startDetailPolling(scanId) {
   pollInterval = setInterval(async () => {
     try {
       const status = await api('GET', `/scans/${scanId}/status`);
-      if (status.status === 'completed' || status.status === 'failed') {
+      if (['completed', 'incomplete', 'cancelled', 'failed'].includes(status.status)) {
         stopPolling();
         loadScanDetail(scanId);
       }
@@ -697,7 +719,7 @@ function copyPayload(id) {
 $('#btn-download-report').addEventListener('click', async () => {
   if (!currentScanId) return;
   try {
-    const resp = await fetch(`/api/scans/${currentScanId}/report`);
+    const resp = await apiFetch(`/api/scans/${currentScanId}/report`);
     if (!resp.ok) throw new Error('Failed to generate report');
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
@@ -720,7 +742,7 @@ $('#btn-download-docx').addEventListener('click', async () => {
   btn.disabled = true;
   btn.innerHTML = 'Generating…';
   try {
-    const resp = await fetch(`/api/scans/${currentScanId}/report.docx`);
+    const resp = await apiFetch(`/api/scans/${currentScanId}/report.docx`);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: 'Failed to generate DOCX report' }));
       throw new Error(err.error || 'Failed to generate DOCX report');

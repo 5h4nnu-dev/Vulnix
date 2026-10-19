@@ -173,7 +173,7 @@ const stmts = {
 
   completeScan: db.prepare(`
     UPDATE scans SET
-      status = 'completed', risk_score = @risk_score, risk_level = @risk_level,
+      status = @status, risk_score = @risk_score, risk_level = @risk_level,
       vulnerability_count = @vulnerability_count,
       critical_count = @critical_count, high_count = @high_count,
       medium_count = @medium_count, low_count = @low_count,

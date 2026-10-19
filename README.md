@@ -180,6 +180,7 @@ AI/autonomous modes require the **"I am authorized"** confirmation in the UI (an
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SERVER_HOST` | `127.0.0.1` | Bind address (localhost only by default) |
+| `VULNIX_API_TOKEN` | unset | Random secret (at least 32 characters) required for API access on non-loopback binds; the UI prompts for it |
 | `PORT` | `5000` | Server port |
 | `LLM_ENABLED` | `false` | Master switch for all AI features |
 | `LLM_PROVIDER` | `ollama` | `ollama` or `openai` |

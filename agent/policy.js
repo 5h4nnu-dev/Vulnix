@@ -6,9 +6,12 @@
  */
 
 const config = require('../config');
+const dns = require('node:dns/promises');
+const net = require('node:net');
 
 const DESTRUCTIVE_METHODS = ['PUT', 'DELETE', 'PATCH'];
 const ALLOWED_METHODS = ['GET', 'POST', 'HEAD', 'OPTIONS', ...DESTRUCTIVE_METHODS];
+const TESTABLE_TYPES = new Set(['sql_injection', 'xss', 'command_injection', 'path_traversal', 'ssrf', 'open_redirect', 'prompt_injection']);
 
 // Hosts that must never be contacted by the scanner (cloud metadata, etc.).
 const BLOCKED_HOSTS = ['169.254.169.254', 'metadata.google.internal', 'metadata.google'];
@@ -80,12 +83,44 @@ function checkScope(url, targetUrl) {
         const inScope = allow.some((entry) => host === entry.toLowerCase() || host.endsWith('.' + entry.toLowerCase()));
         if (!inScope) return { allowed: false, reason: `host not in AUTHORIZED_TARGETS: ${host}` };
     } else {
-        let targetHost = '';
-        try { targetHost = new URL(targetUrl).hostname.toLowerCase(); } catch { /* invalid target */ }
-        if (host !== targetHost) return { allowed: false, reason: `host is outside the target origin: ${host}` };
+        let target = null;
+        try { target = new URL(targetUrl); } catch { /* invalid target */ }
+        const webPorts = new Set(['80', '443']);
+        const effectivePort = (u) => u.port || (u.protocol === 'https:' ? '443' : '80');
+        const sameTargetOrigin = target && parsed.origin === target.origin;
+        const safeSchemeRedirect = target && parsed.hostname.toLowerCase() === target.hostname.toLowerCase() &&
+            webPorts.has(effectivePort(parsed)) && webPorts.has(effectivePort(target));
+        if (!sameTargetOrigin && !safeSchemeRedirect) {
+            return { allowed: false, reason: `origin is outside the target origin: ${parsed.origin}` };
+        }
     }
 
     return { allowed: true, host };
+}
+
+/** Resolve a hostname before allowing a request so public-looking names that
+ * resolve to private, loopback, or link-local addresses cannot bypass scope.
+ * Literal IPs are already covered by checkScope(). */
+async function checkResolvedScope(url, targetUrl) {
+    const scope = checkScope(url, targetUrl);
+    if (!scope.allowed) return scope;
+    let parsed;
+    try { parsed = new URL(url); } catch { return { allowed: false, reason: 'invalid URL' }; }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (net.isIP(hostname) || config.security.allowInternalIps ||
+        hostname === 'localhost' || hostname.endsWith('.localhost')) {
+        return scope;
+    }
+    try {
+        const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+        if (!addresses.length) return { allowed: false, reason: 'hostname has no addresses' };
+        if (addresses.some(({ address }) => isInternalHost(address))) {
+            return { allowed: false, reason: 'hostname resolves to an internal/private address' };
+        }
+        return scope;
+    } catch {
+        return { allowed: false, reason: 'hostname resolution failed' };
+    }
 }
 
 /**
@@ -110,6 +145,20 @@ function validateAction(name, args, ctx = {}) {
     }
 
     if (name === 'http_request' || name === 'test_parameter') {
+        if (name === 'test_parameter') {
+            const method = String(a.method || 'GET').toUpperCase();
+            if (!['GET', 'POST'].includes(method)) return { allowed: false, reason: 'parameter tests support GET and POST only' };
+            if (!TESTABLE_TYPES.has(a.vuln_type)) return { allowed: false, reason: 'unsupported vulnerability class' };
+            if (typeof a.param !== 'string' || !a.param || a.param.length > 256) return { allowed: false, reason: 'parameter name is missing or too long' };
+            const payloads = Array.isArray(a.payloads)
+                ? a.payloads.map((p) => typeof p === 'string' ? p : (p && typeof p === 'object' ? p.payload : p))
+                : (a.payload == null ? [] : [a.payload]);
+            if (payloads.some((p) => typeof p !== 'string' || p.length > 2000)) return { allowed: false, reason: 'payloads must be strings of at most 2000 characters' };
+            if (payloads.length > 8) return { allowed: false, reason: 'at most eight payloads may be tested per action' };
+            if (a.fields != null && (!a.fields || typeof a.fields !== 'object' || Array.isArray(a.fields) || Object.keys(a.fields).length > 50 || Object.values(a.fields).some((v) => typeof v !== 'string' || v.length > 2000))) {
+                return { allowed: false, reason: 'form fields must be a flat object with at most 50 short string values' };
+            }
+        }
         const url = name === 'http_request' ? a.url : a.endpoint;
         if (!url) return { allowed: false, reason: 'missing url' };
         const scope = checkScope(url, ctx.targetUrl);
@@ -136,6 +185,7 @@ function validateAction(name, args, ctx = {}) {
 module.exports = {
     isInternalHost,
     checkScope,
+    checkResolvedScope,
     validateAction,
     ALLOWED_METHODS,
     DESTRUCTIVE_METHODS,

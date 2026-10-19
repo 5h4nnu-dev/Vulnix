@@ -14,15 +14,43 @@ const app = express();
 app.disable('x-powered-by');
 const PORT = config.port;
 
+function isLoopbackBind(host) {
+    const value = String(host || '').toLowerCase();
+    return value === 'localhost' || value === '::1' || value === '127.0.0.1' || value.startsWith('127.');
+}
+
+function tokenMatches(provided) {
+    const expected = Buffer.from(config.apiToken);
+    const actual = Buffer.from(provided || '');
+    return expected.length > 0 && expected.length === actual.length && require('node:crypto').timingSafeEqual(expected, actual);
+}
+
 // ── Middleware ───────────────────────────────────────────────────────────────
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// A non-loopback bind is only usable with an explicit API token. Accept
+// Bearer tokens for clients and Basic auth (password = token) for browsers.
+app.use('/api', (req, res, next) => {
+    if (isLoopbackBind(config.host) && !config.apiToken) return next();
+    if (!config.apiToken || config.apiToken.length < 32) {
+        return res.status(503).json({ error: 'Remote API access requires a VULNIX_API_TOKEN of at least 32 characters.' });
+    }
+    const authorization = String(req.headers.authorization || '');
+    let supplied = '';
+    if (/^Bearer\s+/i.test(authorization)) supplied = authorization.replace(/^Bearer\s+/i, '');
+    else if (/^Basic\s+/i.test(authorization)) {
+        try { supplied = Buffer.from(authorization.replace(/^Basic\s+/i, ''), 'base64').toString('utf8').split(':').slice(1).join(':'); } catch { /* invalid credentials */ }
+    }
+    if (tokenMatches(supplied)) return next();
+    return res.status(401).json({ error: 'API authentication required. Enter the VULNIX_API_TOKEN as the password.' });
+});
+
 // ── API Routes ──────────────────────────────────────────────────────────────
 
 // Create a new scan
-app.post('/api/scans', (req, res) => {
+app.post('/api/scans', async (req, res) => {
     const { url, options, mode, useAi, aiModel, authorized } = req.body || {};
 
     if (!url || typeof url !== 'string') {
@@ -36,6 +64,11 @@ app.post('/api/scans', (req, res) => {
 
     try { new URL(normalizedUrl); } catch {
         return res.status(400).json({ error: 'Invalid URL' });
+    }
+
+    const targetScope = await policy.checkResolvedScope(normalizedUrl, normalizedUrl);
+    if (!targetScope.allowed) {
+        return res.status(403).json({ error: `Target not allowed: ${targetScope.reason}` });
     }
 
     const scanMode = ['deterministic', 'agent', 'hybrid'].includes(mode) ? mode : 'deterministic';
@@ -65,8 +98,21 @@ app.post('/api/scans', (req, res) => {
         checkSensitiveFiles: true,
         mode: scanMode,
         useAi: aiOn,
-        ...options,
     };
+    // Only accept the supported boolean check switches from the request.
+    // In particular, callers cannot override mode, AI authorization, scope,
+    // or server-side request/time budgets through this object.
+    const checkOptions = [
+        'checkHeaders', 'checkCors', 'checkSqlInjection', 'checkXss',
+        'checkOpenRedirect', 'checkCommandInjection', 'checkPathTraversal',
+        'checkSsrf', 'checkPromptInjection', 'checkApiEndpoints',
+        'checkHttpMethods', 'checkRateLimit', 'checkSensitiveFiles', 'checkSurfaces',
+    ];
+    if (options && typeof options === 'object' && !Array.isArray(options)) {
+        for (const key of checkOptions) {
+            if (typeof options[key] === 'boolean') scanOptions[key] = options[key];
+        }
+    }
 
     const id = uuid();
 
@@ -268,6 +314,7 @@ app.get('/api/payloads/stats', (req, res) => {
 app.post('/api/scans/:id/cancel', (req, res) => {
     const scan = stmts.getScan.get(req.params.id);
     if (!scan) return res.status(404).json({ error: 'Scan not found' });
+    if (!['pending', 'running'].includes(scan.status)) return res.status(409).json({ error: `Scan is ${scan.status} and cannot be cancelled.` });
     cancelScan(scan.id);
     res.json({ id: scan.id, cancelling: true });
 });
@@ -306,7 +353,7 @@ app.post('/api/prompt-injection/test', async (req, res) => {
 
     // Scope/safety: block metadata endpoints and private ranges (unless the
     // host is the target itself), mirroring the agent's hard boundary.
-    const scope = policy.checkScope(normalizedUrl, normalizedUrl);
+    const scope = await policy.checkResolvedScope(normalizedUrl, normalizedUrl);
     if (!scope.allowed) {
         return res.status(403).json({ error: `Target not allowed: ${scope.reason}` });
     }

@@ -13,7 +13,9 @@ const { parseHtml } = require('../surfaces');
 const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('../xss-guards');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const requestBudget = new AsyncLocalStorage();
-const { checkScope } = require('./policy');
+const responseTimers = new WeakMap();
+const { checkResolvedScope } = require('./policy');
+const { applyCookies, captureCookies } = require('../http/session');
 
 // ── Small self-contained helpers (avoid coupling to scanner.js) ───────────────
 
@@ -33,15 +35,40 @@ function headersToObj(headers) {
     return obj;
 }
 
+function bindBodyTimeout(resp, timer, onError) {
+    responseTimers.set(resp, timer);
+    for (const method of ['text', 'json', 'arrayBuffer', 'blob', 'formData']) {
+        if (typeof resp[method] !== 'function') continue;
+        const read = resp[method].bind(resp);
+        Object.defineProperty(resp, method, {
+            configurable: true,
+            value: (...args) => Promise.resolve(read(...args)).catch((err) => {
+                if (onError) onError();
+                throw err;
+            }).finally(() => {
+                clearTimeout(responseTimers.get(resp));
+                responseTimers.delete(resp);
+            }),
+        });
+    }
+    return resp;
+}
+
 async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const budget = requestBudget.getStore();
     const targetUrl = budget?.memory.targetUrl;
     let currentUrl = String(url);
     const redirects = Number.isInteger(opts.maxRedirects) ? opts.maxRedirects : 5;
     const requestOpts = { ...opts };
+    const callerHeaders = { ...(requestOpts.headers || {}) };
     delete requestOpts.maxRedirects;
     for (let hop = 0; hop <= redirects; hop++) {
     if (budget) {
+        const scope = await checkResolvedScope(currentUrl, targetUrl);
+        if (!scope.allowed) {
+            budget.memory.scopeBlocked += 1;
+            return null;
+        }
         const remainingMs = budget.memory.maxSeconds * 1000 - (Date.now() - budget.memory.startedAt);
         if (budget.memory.requestCount >= budget.memory.maxRequests || remainingMs <= 0) {
             budget.exhausted = true;
@@ -53,12 +80,25 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+        const headers = applyCookies(currentUrl, callerHeaders, budget?.cookies);
+        requestOpts.headers = headers;
         const resp = await fetch(currentUrl, { redirect: 'manual', ...requestOpts, signal: controller.signal });
-        clearTimeout(timer);
-        if (requestOpts.redirect === 'manual' || ![301, 302, 303, 307, 308].includes(resp.status) || !resp.headers.get('location')) return resp;
-        if (hop === redirects) return resp;
+        captureCookies(currentUrl, resp.headers, budget?.cookies);
+        const onBodyError = budget ? () => { budget.memory.requestFailures += 1; } : null;
+        if (requestOpts.redirect === 'manual' || ![301, 302, 303, 307, 308].includes(resp.status) || !resp.headers.get('location')) return bindBodyTimeout(resp, timer, onBodyError);
+        if (hop === redirects) return bindBodyTimeout(resp, timer, onBodyError);
         const nextUrl = new URL(resp.headers.get('location'), currentUrl).toString();
-        if (!targetUrl || !checkScope(nextUrl, targetUrl).allowed) return null;
+        if (!targetUrl || !(await checkResolvedScope(nextUrl, targetUrl)).allowed) {
+            clearTimeout(timer);
+            if (budget) budget.memory.scopeBlocked += 1;
+            return null;
+        }
+        clearTimeout(timer);
+        if (new URL(currentUrl).origin !== new URL(nextUrl).origin) {
+            for (const key of Object.keys(callerHeaders)) {
+                if (/^(?:authorization|cookie|proxy-authorization)$/i.test(key)) delete callerHeaders[key];
+            }
+        }
         currentUrl = nextUrl;
         if ([301, 302, 303].includes(resp.status) && requestOpts.method && requestOpts.method !== 'GET' && requestOpts.method !== 'HEAD') {
             requestOpts.method = 'GET';
@@ -74,10 +114,34 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
 }
 
 function withRequestBudget(memory, fn) {
-    return requestBudget.run({ memory, exhausted: false }, fn);
+    return requestBudget.run({ memory, exhausted: false, cookies: new Map() }, fn);
 }
 
 async function readBody(resp, maxLen = 20000) {
+    if (resp?.body && typeof resp.body.getReader === 'function') {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let text = '';
+        try {
+            while (text.length < maxLen) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                text += decoder.decode(value, { stream: true });
+            }
+            if (text.length >= maxLen) await reader.cancel();
+            else text += decoder.decode();
+            clearTimeout(responseTimers.get(resp));
+            responseTimers.delete(resp);
+            return text.slice(0, maxLen);
+        } catch {
+            try { await reader.cancel(); } catch { /* already closed */ }
+            const budget = requestBudget.getStore();
+            if (budget) budget.memory.requestFailures += 1;
+            clearTimeout(responseTimers.get(resp));
+            responseTimers.delete(resp);
+            return text.slice(0, maxLen);
+        }
+    }
     try {
         const text = await resp.text();
         return text.length > maxLen ? text.slice(0, maxLen) : text;
@@ -462,10 +526,15 @@ async function execute(name, args, state) {
 
         case 'generate_payloads': {
             const vulnType = a.vuln_type;
+            const endpoint = a.endpoint || state.targetUrl;
+            let contentType = null;
+            try { contentType = state.baseline.recon?.contentType || null; } catch { /* no recon metadata */ }
             const ctx = {
-                url: state.targetUrl,
+                url: endpoint,
+                method: a.method || 'GET',
                 parameters: a.param ? [a.param] : [],
-                technology: [],
+                technology: state.baseline.recon?.tech || [],
+                contentType,
                 notes: a.notes || '',
             };
             const result = await payloadGenerator.generate(ctx, vulnType, {
@@ -483,32 +552,111 @@ async function execute(name, args, state) {
             const vulnType = a.vuln_type;
             const detector = DETECTORS[vulnType];
             if (!detector) return { ok: false, error: `unsupported vuln_type: ${vulnType}` };
-            const payload = a.payload || (DEFAULT_PAYLOADS[vulnType] || [''])[0];
             const method = String(a.method || 'GET').toUpperCase();
-            const requestOptions = { method, fields: a.fields, contentType: a.content_type };
-            const result = await detector(a.endpoint, a.param, payload, state.baseline, requestOptions);
-            return { ok: true, vuln_type: vulnType, param: a.param, method, payload_used: payload, result };
+            const candidates = Array.isArray(a.payloads)
+                ? a.payloads.map((p) => typeof p === 'string' ? p : p?.payload)
+                    .filter((p) => typeof p === 'string' && p.length > 0 && p.length <= 2000).slice(0, 8)
+                : [];
+            const payloads = candidates.length ? candidates : [a.payload || (DEFAULT_PAYLOADS[vulnType] || [''])[0]];
+            const matchedForm = method === 'POST'
+                ? (state.baseline.recon?.forms || []).find((form) => {
+                    try {
+                        return new URL(form.url || form.path, state.targetUrl).href === new URL(a.endpoint, state.targetUrl).href &&
+                            String(form.method || 'GET').toUpperCase() === 'POST';
+                    } catch { return false; }
+                })
+                : null;
+            const requestOptions = {
+                method,
+                fields: { ...(matchedForm?.values || {}), ...(a.fields || {}) },
+                contentType: a.content_type,
+            };
+            const tests = [];
+            for (const payload of payloads) {
+                if (state.memory.outOfBudget()) break;
+                // eslint-disable-next-line no-await-in-loop
+                const first = await detector(a.endpoint, a.param, payload, state.baseline, requestOptions);
+                let result = first;
+                let confirmed = false;
+                if (first.vulnerable) {
+                    if (first.technique === 'time') {
+                        // The timing detector already compares a benign control
+                        // with two delayed responses.
+                        confirmed = true;
+                        result = { ...first, confirmed: true };
+                    } else if (!state.memory.outOfBudget()) {
+                        // Require the same signal on an independent request to
+                        // reduce findings caused by dynamic or incidental text.
+                        // eslint-disable-next-line no-await-in-loop
+                        const second = await detector(a.endpoint, a.param, payload, state.baseline, requestOptions);
+                        confirmed = second.vulnerable === true && second.technique === first.technique;
+                        result = confirmed
+                            ? {
+                                ...first,
+                                confirmed: true,
+                                confirmation: second.evidence || second.technique,
+                                evidence: `${first.evidence || first.technique}; reproduced by confirmation request: ${second.evidence || second.technique}`,
+                            }
+                            : { ...first, vulnerable: false, confirmed: false, reason: 'signal did not reproduce on confirmation request', initialEvidence: first.evidence };
+                    } else {
+                        result = { ...first, vulnerable: false, confirmed: false, reason: 'confirmation skipped because the request budget is exhausted', initialEvidence: first.evidence };
+                    }
+                }
+                tests.push({ payload, result, complete: result.status != null || result.vulnerable === true });
+                if (confirmed) break;
+            }
+            const selected = tests.find((t) => t.result.vulnerable) || tests[0];
+            const complete = tests.every((t) => t.complete) && (
+                tests.some((t) => t.result.vulnerable && t.result.confirmed) || tests.length === payloads.length
+            );
+            return {
+                ok: tests.length > 0,
+                complete,
+                vuln_type: vulnType,
+                param: a.param,
+                method,
+                payload_used: selected?.payload || null,
+                result: selected?.result || { vulnerable: false, reason: 'no probe completed' },
+                tests,
+            };
         }
 
         case 'record_finding': {
             const test = state.lastTest;
             const obs = test && test.observation ? test.observation : null;
-            if (!obs || !obs.result || obs.result.vulnerable !== true) {
+            if (!obs || obs.complete !== true || !obs.result || obs.result.vulnerable !== true || obs.result.confirmed !== true && obs.result.technique !== 'time') {
                 return { ok: false, error: 'a finding requires a recent positive test_parameter result' };
             }
             if (a.type && a.type !== obs.vuln_type) {
                 return { ok: false, error: `finding type must match tested type ${obs.vuln_type}` };
             }
+            if (typeof a.title !== 'string' || !a.title.trim() || typeof a.description !== 'string' || !a.description.trim()) {
+                return { ok: false, error: 'finding title and description are required' };
+            }
+
+            const severityByType = {
+                sql_injection: 'high', xss: 'high', command_injection: 'high',
+                path_traversal: 'high', ssrf: 'high', open_redirect: 'medium',
+                prompt_injection: 'medium',
+            };
+            const titleByType = {
+                sql_injection: 'SQL Injection', xss: 'Cross-Site Scripting (XSS)',
+                command_injection: 'Command Injection', path_traversal: 'Path Traversal',
+                ssrf: 'Server-Side Request Forgery (SSRF)', open_redirect: 'Open Redirect',
+                prompt_injection: 'Prompt Injection',
+            };
 
             const finding = {
                 type: obs.vuln_type,
-                severity: a.severity || 'medium',
-                title: a.title,
-                description: a.description,
+                severity: severityByType[obs.vuln_type] || 'medium',
+                title: `${titleByType[obs.vuln_type] || 'Confirmed Vulnerability'}: ${String(test.args.param).slice(0, 120)}`,
+                description: `${a.description.trim().slice(0, 2000)} Confirmed by ${obs.result.technique || 'detector'} on ${test.args.method || 'GET'} input "${String(test.args.param).slice(0, 120)}".`,
                 affectedEndpoint: test.args.endpoint,
                 payload: obs.payload_used || test.args.payload || null,
                 evidence: obs.result.evidence || `vulnerable:true via ${obs.result.technique || 'detector'}`,
-                remediation: a.remediation || 'Review and remediate according to the finding type.',
+                remediation: typeof a.remediation === 'string' && a.remediation.trim()
+                    ? a.remediation.trim().slice(0, 2000)
+                    : 'Review and remediate according to the finding type.',
                 source: 'ai',
             };
             state.memory.addFinding(finding);

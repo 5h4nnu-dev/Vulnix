@@ -119,8 +119,8 @@ To finish, use:
 MANDATORY WORKFLOW:
 - Turn 1: If no endpoints/params are known from the initial message, call crawl(path: "/") and DO NOT finish.
 - Enumerate endpoints, query parameters, and form fields. Test GET inputs with method GET; test discovered POST form fields with method POST and preserve the other form values in fields when available. Use application/json only when the endpoint expects JSON.
-- For each discovered input, call test_parameter with vuln_type in {sql_injection, xss} (and others only if justified). A finish request is rejected while discovered SQLi/XSS coverage remains.
-- Only call record_finding if the most recent test_parameter observation shows result.vulnerable === true and includes concrete evidence. Set evidence to that concrete evidence.
+- For each discovered input, call test_parameter with vuln_type in {sql_injection, xss} (and others only if justified). You may generate payloads for that endpoint and pass up to eight strings in one test_parameter call; review every returned test and confirmation result. A finish request is rejected while discovered SQLi/XSS coverage remains.
+- Only call record_finding if the most recent test_parameter observation is complete and shows result.vulnerable === true with confirmed evidence. Timing results are already independently confirmed by controls; other positive signals require reproduction. Set evidence to the detector's concrete evidence.
 - Do NOT call record_finding based on guesses, http_request body text alone, or generic observations.
 - Call finish only after you have enumerated and tested plausible parameters for discovered endpoints, or budget is exhausted.`;
 

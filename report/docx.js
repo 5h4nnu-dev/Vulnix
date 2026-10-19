@@ -104,7 +104,9 @@ async function generate(scan, vulns, events, extras = {}) {
     children.push(para(txt('Vulnerabilities', { bold: true, size: 28 }), { heading: HeadingLevel.HEADING_1 }));
 
     if (vulnerabilities.length === 0) {
-        children.push(para(txt('No exploitable vulnerabilities were detected.')));
+        children.push(para(txt(scan.status === 'completed'
+            ? 'No exploitable vulnerabilities were detected in the tested surfaces. This does not establish that undiscovered or untested areas are vulnerability-free.'
+            : `No findings were recorded. Scan status: ${scan.status || 'unknown'}. Coverage was incomplete, so this result must not be interpreted as evidence that the target is vulnerability-free.`)));
     }
 
     vulnerabilities.forEach((v, i) => {
