@@ -79,6 +79,10 @@ function checkScope(url, targetUrl) {
     if (allow.length > 0) {
         const inScope = allow.some((entry) => host === entry.toLowerCase() || host.endsWith('.' + entry.toLowerCase()));
         if (!inScope) return { allowed: false, reason: `host not in AUTHORIZED_TARGETS: ${host}` };
+    } else {
+        let targetHost = '';
+        try { targetHost = new URL(targetUrl).hostname.toLowerCase(); } catch { /* invalid target */ }
+        if (host !== targetHost) return { allowed: false, reason: `host is outside the target origin: ${host}` };
     }
 
     return { allowed: true, host };

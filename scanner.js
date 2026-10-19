@@ -2327,9 +2327,9 @@ async function runScan(scanId, url, options = {}) {
                     },
                     isCancelled: () => cancelledScans.has(scanId),
                     });
-                    const agentComplete = agentResult.stopped === 'finished' && !agentResult.requestFailures;
+                    const agentComplete = agentResult.stopped === 'finished' && !agentResult.requestFailures && agentResult.coverageComplete;
                     addEvent(scanId, 'agent', agentComplete ? 'info' : 'warning', 'Agent Coverage Summary',
-                        `Agent stopped: ${agentResult.stopped}; ${agentResult.steps} step(s), ${agentResult.requestCount} scanner-issued request call(s), ${agentResult.requestFailures} failed call(s), ${agentResult.findings} finding(s), ${agentResult.elapsedSeconds}s elapsed. Total scan request calls: ${ctx.requestCount + agentResult.requestCount}/${ctx.maxRequests}.${agentComplete ? '' : ' Agent coverage may be incomplete.'}`, { severity: agentComplete ? undefined : 'info' });
+                        `Agent stopped: ${agentResult.stopped}; ${agentResult.steps} step(s), ${agentResult.requestCount} scanner-issued request call(s), ${agentResult.requestFailures} failed call(s), ${agentResult.findings} finding(s), ${agentResult.elapsedSeconds}s elapsed, discovered-parameter coverage ${agentResult.coverageComplete ? 'complete' : 'incomplete'}. Total scan request calls: ${ctx.requestCount + agentResult.requestCount}/${ctx.maxRequests}.${agentComplete ? '' : ' Agent coverage may be incomplete.'}`, { severity: agentComplete ? undefined : 'info' });
                 }
             } else {
                 if (mode !== 'deterministic' && !config.llm.enabled) {

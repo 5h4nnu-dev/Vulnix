@@ -13,6 +13,7 @@ const { parseHtml } = require('../surfaces');
 const { hasExecutableXssToken, isInsideHtmlComment, isInsideQuotedAttribute, isRenderableHtml } = require('../xss-guards');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const requestBudget = new AsyncLocalStorage();
+const { checkScope } = require('./policy');
 
 // ── Small self-contained helpers (avoid coupling to scanner.js) ───────────────
 
@@ -34,6 +35,12 @@ function headersToObj(headers) {
 
 async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const budget = requestBudget.getStore();
+    const targetUrl = budget?.memory.targetUrl;
+    let currentUrl = String(url);
+    const redirects = Number.isInteger(opts.maxRedirects) ? opts.maxRedirects : 5;
+    const requestOpts = { ...opts };
+    delete requestOpts.maxRedirects;
+    for (let hop = 0; hop <= redirects; hop++) {
     if (budget) {
         const remainingMs = budget.memory.maxSeconds * 1000 - (Date.now() - budget.memory.startedAt);
         if (budget.memory.requestCount >= budget.memory.maxRequests || remainingMs <= 0) {
@@ -46,14 +53,24 @@ async function fetchSafe(url, opts = {}, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        const resp = await fetch(url, { redirect: 'follow', ...opts, signal: controller.signal });
+        const resp = await fetch(currentUrl, { redirect: 'manual', ...requestOpts, signal: controller.signal });
         clearTimeout(timer);
-        return resp;
+        if (requestOpts.redirect === 'manual' || ![301, 302, 303, 307, 308].includes(resp.status) || !resp.headers.get('location')) return resp;
+        if (hop === redirects) return resp;
+        const nextUrl = new URL(resp.headers.get('location'), currentUrl).toString();
+        if (!targetUrl || !checkScope(nextUrl, targetUrl).allowed) return null;
+        currentUrl = nextUrl;
+        if ([301, 302, 303].includes(resp.status) && requestOpts.method && requestOpts.method !== 'GET' && requestOpts.method !== 'HEAD') {
+            requestOpts.method = 'GET';
+            delete requestOpts.body;
+        }
     } catch {
         clearTimeout(timer);
         if (budget) budget.memory.requestFailures += 1;
         return null;
     }
+    }
+    return null;
 }
 
 function withRequestBudget(memory, fn) {
@@ -109,13 +126,34 @@ function buildRequestUrl(endpoint, param, payload) {
     }
 }
 
+function buildParameterRequest(endpoint, param, payload, options = {}) {
+    const method = String(options.method || 'GET').toUpperCase();
+    if (method !== 'POST') {
+        const url = buildRequestUrl(endpoint, param, payload);
+        return url ? { url, init: {} } : null;
+    }
+    const fields = { ...(options.fields || {}), [param]: payload };
+    const contentType = String(options.contentType || 'application/x-www-form-urlencoded').toLowerCase();
+    if (contentType.includes('application/json')) {
+        return { url: endpoint, init: { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) } };
+    }
+    return { url: endpoint, init: { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() } };
+}
+
 // ── Detectors ────────────────────────────────────────────────────────────────
 
-async function detectSqlInjection(url, param, payload, baseline) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
+async function detectSqlInjection(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    let measuredBaseline = baseline?.time || 1000;
+    if (/sleep|pg_sleep|waitfor|benchmark/i.test(payload)) {
+        const control = buildParameterRequest(url, param, 'vulnix_baseline', options);
+        const t0 = Date.now();
+        const controlResp = await fetchSafe(control.url, { ...control.init, headers: { 'User-Agent': UA, ...(control.init.headers || {}) } });
+        if (controlResp) measuredBaseline = Date.now() - t0;
+    }
     const start = Date.now();
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
     const duration = Date.now() - start;
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const body = await readBody(resp);
@@ -140,13 +178,13 @@ async function detectSqlInjection(url, param, payload, baseline) {
     if (/sleep|pg_sleep|waitfor|benchmark/i.test(payload)) {
         // Relative delta over the baseline plus a confirmation request, so
         // slow-but-healthy endpoints and transient spikes are not flagged.
-        const threshold = Math.max(3000, (baseline?.time || 1000) + 3000);
+        const threshold = Math.max(3000, measuredBaseline + 3000);
         if (duration > threshold) {
             const cStart = Date.now();
-            const cResp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+            const cResp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
             const cDur = Date.now() - cStart;
             if (cResp && cDur > threshold) {
-                return { vulnerable: true, technique: 'time', evidence: `${duration}ms & ${cDur}ms vs baseline ${baseline?.time}ms`, status: resp.status };
+                return { vulnerable: true, technique: 'time', evidence: `${duration}ms & ${cDur}ms vs same-endpoint control ${measuredBaseline}ms`, status: resp.status };
             }
         }
     }
@@ -154,7 +192,8 @@ async function detectSqlInjection(url, param, payload, baseline) {
         const falsePayloads = [payload.replace('1=1', '1=2'), payload.replace('1=1', '1=3')];
         const falseLengths = [];
         for (const falsePayload of falsePayloads) {
-            const falseResp = await fetchSafe(buildRequestUrl(url, param, falsePayload), { headers: { 'User-Agent': UA } });
+            const falseRequest = buildParameterRequest(url, param, falsePayload, options);
+            const falseResp = falseRequest && await fetchSafe(falseRequest.url, { ...falseRequest.init, headers: { 'User-Agent': UA, ...(falseRequest.init.headers || {}) } });
             falseLengths.push(falseResp ? (await readBody(falseResp)).length : null);
         }
         const [falseA, falseB] = falseLengths;
@@ -169,10 +208,10 @@ async function detectSqlInjection(url, param, payload, baseline) {
     return { vulnerable: false, reason: 'no SQLi indicator', status: resp.status };
 }
 
-async function detectXss(url, param, payload) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+async function detectXss(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
     if (!resp) return { vulnerable: false, reason: 'no response' };
 
     // Mirror scanner.checkXss sinks: raw reflection in a JSON/XML/JS body is
@@ -198,11 +237,18 @@ async function detectXss(url, param, payload) {
     return { vulnerable: true, technique: 'reflection', evidence: `payload reflected at index ${idx}`, status: resp.status };
 }
 
-async function detectCommandInjection(url, param, payload, baseline) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
+async function detectCommandInjection(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    let measuredBaseline = baseline?.time || 1000;
+    if (/sleep|timeout|ping/i.test(payload)) {
+        const control = buildParameterRequest(url, param, 'vulnix_baseline', options);
+        const t0 = Date.now();
+        const controlResp = await fetchSafe(control.url, { ...control.init, headers: { 'User-Agent': UA, ...(control.init.headers || {}) } });
+        if (controlResp) measuredBaseline = Date.now() - t0;
+    }
     const start = Date.now();
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } }, 15000);
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } }, 15000);
     const duration = Date.now() - start;
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const body = await readBody(resp);
@@ -219,23 +265,23 @@ async function detectCommandInjection(url, param, payload, baseline) {
     }
     if (/sleep|timeout|ping/i.test(payload)) {
         // Relative delta over baseline + confirmation request (see SQLi).
-        const threshold = Math.max(3000, (baseline?.time || 1000) + 3000);
+        const threshold = Math.max(3000, measuredBaseline + 3000);
         if (duration > threshold) {
             const cStart = Date.now();
-            const cResp = await fetchSafe(target, { headers: { 'User-Agent': UA } }, 15000);
+            const cResp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } }, 15000);
             const cDur = Date.now() - cStart;
             if (cResp && cDur > threshold) {
-                return { vulnerable: true, technique: 'time', evidence: `${duration}ms & ${cDur}ms vs baseline ${baseline?.time}ms`, status: resp.status };
+                return { vulnerable: true, technique: 'time', evidence: `${duration}ms & ${cDur}ms vs same-endpoint control ${measuredBaseline}ms`, status: resp.status };
             }
         }
     }
     return { vulnerable: false, reason: 'no command-injection indicator', status: resp.status };
 }
 
-async function detectPathTraversal(url, param, payload, baseline) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+async function detectPathTraversal(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const body = await readBody(resp);
     for (const sig of TRAVERSAL_SIGNATURES) {
@@ -245,10 +291,10 @@ async function detectPathTraversal(url, param, payload, baseline) {
     return { vulnerable: false, reason: 'no traversal signature', status: resp.status };
 }
 
-async function detectSsrf(url, param, payload) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+async function detectSsrf(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const body = await readBody(resp);
     // A response that echoes our requested URL back (search/debug/JSON mirrors)
@@ -265,10 +311,10 @@ async function detectSsrf(url, param, payload) {
     return { vulnerable: false, reason: 'no SSRF indicator', status: resp.status };
 }
 
-async function detectOpenRedirect(url, param, payload) {
-    const target = buildRequestUrl(url, param, payload);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA }, redirect: 'manual' });
+async function detectOpenRedirect(url, param, payload, baseline, options = {}) {
+    const request = buildParameterRequest(url, param, payload, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) }, redirect: 'manual', maxRedirects: 0 });
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const location = resp.headers.get('location');
     if (resp.status >= 300 && resp.status < 400 && location) {
@@ -283,7 +329,7 @@ async function detectOpenRedirect(url, param, payload) {
     return { vulnerable: false, reason: 'no external redirect', status: resp.status };
 }
 
-async function detectPromptInjection(url, param, payload, baseline) {
+async function detectPromptInjection(url, param, payload, baseline, options = {}) {
     // For instruction-override probes we substitute a UNIQUE token for the
     // `{{CANARY}}` placeholder (or a literal CANARY token). A static/benign page
     // can never contain it; only a target that echoes user input (excluded
@@ -298,9 +344,9 @@ async function detectPromptInjection(url, param, payload, baseline) {
     if (placeholder.test(probe)) probe = probe.replace(placeholder, token);
     else if (bareCanary) probe = probe.replace(bareCanary[0], token);
 
-    const target = buildRequestUrl(url, param, probe);
-    if (!target) return { vulnerable: false, reason: 'invalid URL' };
-    const resp = await fetchSafe(target, { headers: { 'User-Agent': UA } });
+    const request = buildParameterRequest(url, param, probe, options);
+    if (!request) return { vulnerable: false, reason: 'invalid URL' };
+    const resp = await fetchSafe(request.url, { ...request.init, headers: { 'User-Agent': UA, ...(request.init.headers || {}) } });
     if (!resp) return { vulnerable: false, reason: 'no response' };
     const body = await readBody(resp);
 
@@ -352,7 +398,6 @@ async function execute(name, args, state) {
         case 'http_request': {
             const method = String(a.method || 'GET').toUpperCase();
             const headers = { 'User-Agent': UA, ...(a.headers || {}) };
-            state.memory.incrementRequests();
             const start = Date.now();
             const resp = await fetchSafe(a.url, { method, headers, body: a.body, redirect: 'manual' });
             const duration = Date.now() - start;
@@ -439,8 +484,10 @@ async function execute(name, args, state) {
             const detector = DETECTORS[vulnType];
             if (!detector) return { ok: false, error: `unsupported vuln_type: ${vulnType}` };
             const payload = a.payload || (DEFAULT_PAYLOADS[vulnType] || [''])[0];
-            const result = await detector(a.endpoint, a.param, payload, state.baseline);
-            return { ok: true, vuln_type: vulnType, param: a.param, payload_used: payload, result };
+            const method = String(a.method || 'GET').toUpperCase();
+            const requestOptions = { method, fields: a.fields, contentType: a.content_type };
+            const result = await detector(a.endpoint, a.param, payload, state.baseline, requestOptions);
+            return { ok: true, vuln_type: vulnType, param: a.param, method, payload_used: payload, result };
         }
 
         case 'record_finding': {
@@ -483,4 +530,4 @@ async function execute(name, args, state) {
     }
 }
 
-module.exports = { execute, DEFAULT_PAYLOADS, DETECTORS, withRequestBudget };
+module.exports = { execute, DEFAULT_PAYLOADS, DETECTORS, withRequestBudget, fetchSafe };

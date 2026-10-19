@@ -27,12 +27,15 @@ function buildSystemPrompt() {
 }
 
 async function quickRecon(url) {
+    const start = Date.now();
     try {
-        const resp = await fetch(url, { headers: { 'User-Agent': 'Vulnix-Agent/1.0' }, redirect: 'follow' });
+        const fetcher = tools.fetchSafe || fetch;
+        const resp = await fetcher(url, { headers: { 'User-Agent': 'Vulnix-Agent/1.0' } });
+        if (!resp) return { status: null, bodyLength: 0, body: '', time: Date.now() - start };
         const body = await resp.text();
-        return { status: resp.status, bodyLength: body.length, body: body.slice(0, 4000) };
+        return { status: resp.status, bodyLength: body.length, body: body.slice(0, 4000), time: Date.now() - start };
     } catch {
-        return { status: null, bodyLength: 0, body: '' };
+        return { status: null, bodyLength: 0, body: '', time: Date.now() - start };
     }
 }
 
@@ -92,7 +95,7 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         targetUrl: url,
         memory,
         baseline: {
-            time: options.baselineTime || 1000,
+            time: options.baselineTime ?? baseline.time,
             bodyLength: baseline.bodyLength,
             body: baseline.body,
             recon: reconData,
@@ -108,6 +111,24 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         parameters: (reconData.parameters || []).slice(0, 40),
         forms: (reconData.forms || []).slice(0, 20),
     };
+
+    // Keep a harness-side coverage ledger. A model's `finish` action is not
+    // proof that the discovered query/form inputs were actually exercised.
+    const requiredTests = new Set();
+    const completedTests = new Set();
+    const addRequired = (endpoint, params, method = 'GET') => {
+        if (!endpoint || !Array.isArray(params)) return;
+        let normalized;
+        try { normalized = new URL(endpoint, url).toString(); } catch { return; }
+        for (const param of params) {
+            for (const type of ['sql_injection', 'xss']) {
+                requiredTests.add(`${method.toUpperCase()} ${normalized} ${param} ${type}`);
+            }
+        }
+    };
+    for (const endpoint of (reconData.endpoints || [])) addRequired(endpoint.path, endpoint.parameters || endpoint.params || [], 'GET');
+    for (const link of (reconData.links || [])) addRequired(link.url || link.path, link.params || [], 'GET');
+    for (const form of (reconData.forms || [])) addRequired(form.url || form.path, form.probeParams || form.params || [], form.method || 'GET');
 
     const messages = [
         { role: 'system', content: buildSystemPrompt() },
@@ -167,6 +188,14 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         const step = { step: stepNo, thought, action, args };
 
         if (action === 'finish' || !action) {
+            const pending = [...requiredTests].filter((key) => !completedTests.has(key));
+            if (pending.length && !memory.outOfBudget()) {
+                memory.addStep({ step: stepNo, thought, action, args, observation: { finished: false, pendingCoverage: pending.length } });
+                if (hooks.recordStep) hooks.recordStep(stepNo, action, args, `finish rejected: ${pending.length} required test(s) pending`, false);
+                messages.push({ role: 'assistant', content: JSON.stringify(parsed) });
+                messages.push({ role: 'user', content: `Coverage check: finish was rejected because ${pending.length} discovered parameter test(s) remain. Next required tests: ${pending.slice(0, 8).join('; ')}. Use test_parameter with the listed method and vulnerability class. The remaining count is ${pending.length}.` });
+                continue;
+            }
             memory.finished = true;
             memory.summary = args.summary || thought || '';
             step.observation = { finished: true };
@@ -189,6 +218,7 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
 
         const verdict = policy.validateAction(action, args, { targetUrl: url, requestCount: memory.requestCount });
         let observation;
+        if (action !== 'test_parameter' && action !== 'record_finding') state.lastTest = null;
         if (!verdict.allowed) {
             observation = { ok: false, denied: true, reason: verdict.reason };
             emit('agent', 'warning', 'Action Denied', `${action}: ${verdict.reason}`, {});
@@ -199,8 +229,12 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         if (action === 'test_parameter') {
             try {
                 state.lastTest = { action, args, observation };
+                if (observation && observation.ok) {
+                    completedTests.add(`${String(args.method || 'GET').toUpperCase()} ${new URL(args.endpoint, url).toString()} ${args.param} ${args.vuln_type}`);
+                }
             } catch { /* ignore */ }
         }
+        if (action === 'record_finding') state.lastTest = null;
 
         step.observation = observation;
         memory.addStep(step);
@@ -239,6 +273,7 @@ async function runAgent(scanId, url, options = {}, hooks = {}) {
         requestCount: memory.requestCount,
         requestFailures: memory.requestFailures,
         elapsedSeconds: Math.round(memory.elapsedSeconds()),
+        coverageComplete: [...requiredTests].every((key) => completedTests.has(key)),
     };
     });
 }
